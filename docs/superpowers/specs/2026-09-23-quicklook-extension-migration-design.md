@@ -33,14 +33,14 @@ Graphics existant.
 | Décision | Choix |
 |---|---|
 | Emplacement | Nouveaux targets dans ce repo existant (pas de nouveau dépôt) |
-| Langage du nouveau code | Swift (app hôte + 2 extensions) ; `CSVDocument`/`CSVRowObject` restent en Objective-C, partagés via bridging header |
+| Langage du nouveau code | Swift (app hôte + 2 extensions). `CSVDocument`/`CSVRowObject` restent en Objective-C, **exclusifs au target legacy** — le nouveau parseur streaming est une structure Swift native indépendante (voir streaming) |
 | Cible de déploiement | macOS 13.0 |
 | Devenir du legacy | Conservé en parallèle pour l'instant ; suppression prévue dans une PR ultérieure séparée |
 | Rendu de l'aperçu | SwiftUI natif (`Table`, via `NSHostingController`) — pas de HTML/WebView |
 | Rendu de la miniature | Core Graphics existant, réutilisé quasiment tel quel |
-| Lecture de fichier | Streaming par scan d'octets bruts + fallback d'encodage par cellule (voir section dédiée), pour la Preview et la Thumbnail Extension |
+| Lecture de fichier | Streaming par scan d'octets/unités bruts (stride adapté à l'encodage) + fallback par cellule + plafonds de sécurité (voir section dédiée), pour la Preview et la Thumbnail Extension |
 | Accès fichier sandbox | Appel défensif `startAccessingSecurityScopedResource()`/`stopAccessingSecurityScopedResource()` autour de la lecture (coût nul si non applicable ; à confirmer empiriquement, voir section streaming) |
-| Partage code `CSVDocument`/`CSVRowObject` | Multi-target membership (pas de framework/Swift Package séparé pour l'instant — à revisiter si le code partagé grossit significativement) |
+| Parseur streaming | Structure Swift native, exclusive aux nouveaux targets — **pas** un ajout à `CSVDocument` (voir streaming). `CSVDocument`/`CSVRowObject` restent 100% cantonnés au target legacy ; la question du partage multi-target (tranchée au tour précédent) devient sans objet |
 | Tests | Ajout d'un target de test (framework **Testing**) — absent aujourd'hui du projet |
 
 ## Architecture & targets
@@ -61,52 +61,51 @@ legacy (inchangé) :
   `QLThumbnailProvider` qui réutilise le dessin Core Graphics de
   `GenerateThumbnailForURL.m`.
 
-**Code partagé** : `CSVDocument.h/.m` et `CSVRowObject.h/.m` restent en
-Objective-C, inchangés dans leur API existante (voir section streaming pour
-l'ajout additif), et sont ajoutés comme membres des deux nouveaux targets
-d'extension via un bridging header côté Swift. Chaque extension étant un
-exécutable séparé, ce code est de toute façon compilé dans chacun des bundles
-qui le consomment, que le partage se fasse par membership direct ou via un
-framework embarqué — le multi-target membership reste donc le choix le plus
-simple pour ce volume de code (~250 lignes, 2 targets consommateurs). Un
-Swift Package local (approche recommandée par Apple pour la modularité
-inter-targets) sera envisagé si ce code partagé grossit significativement.
+**Pas de code partagé avec le legacy** : `CSVDocument.h/.m` et `CSVRowObject.h/.m`
+restent en Objective-C, **inchangés et exclusifs au target legacy**. Les
+nouveaux targets n'en ont pas besoin : le parsing y est assuré par une
+structure Swift native indépendante (voir streaming), donc pas de bridging
+header ni de multi-target membership à mettre en place pour ces fichiers. La
+question tranchée au tour précédent ("multi-target membership vs framework")
+est donc devenue sans objet — il n'y a plus de code à partager entre legacy et
+nouveaux targets.
 
 ## Composants & flux de données
 
+- **`CSVStreamParser`** (Swift, code partagé *entre les deux nouveaux targets
+  uniquement* — pas avec le legacy) — la structure native Swift qui remplace
+  `CSVDocument` pour ce chemin (voir streaming pour l'algorithme). Produit un
+  `ParsedCSVTable` : `columnKeys: [String]`, `rows: [CSVRow]` (avec
+  `CSVRow: Identifiable`, `id` = index de ligne au moment du parsing — stable
+  par construction, donc pas de wrapper supplémentaire nécessaire pour
+  `Table`/`ForEach`), plus les métadonnées (taille fichier, séparateur,
+  encodage détecté, indicateurs de troncature lignes/colonnes).
 - **`CSVPreviewViewController`** (Swift, `QuickLookCSVPreview`) — conforme à
   `QLPreviewingController`, implémente
   `preparePreviewOfFile(at:completionHandler:)`. Enrobe la lecture d'un
   `startAccessingSecurityScopedResource()`/`stopAccessingSecurityScopedResource()`
-  défensif (voir streaming pour le détail), reprend la même logique de
-  détection d'encodage que l'actuel `GeneratePreviewForURL.m` (UTF-8/natif →
-  fallback ISO-8859-1, désormais sur préfixe borné avec repli par cellule — voir
-  streaming), parse via `CSVDocument`, puis construit un view-model (`rows`,
-  `columnKeys`, taille fichier, séparateur, encodage) passé à la vue SwiftUI.
-  Pas de vérification de cancellation à faire manuellement : le nouveau modèle
-  d'extension gère lui-même l'annulation/le teardown.
+  défensif (voir streaming), appelle `CSVStreamParser` pour obtenir un
+  `ParsedCSVTable`, puis le passe à la vue SwiftUI. Pas de vérification de
+  cancellation à faire manuellement : le nouveau modèle d'extension gère
+  lui-même l'annulation/le teardown.
 - **`CSVPreviewView`** (SwiftUI) — un `Table` macOS natif avec colonnes
-  dynamiques (générées depuis `columnKeys`, le nombre de colonnes n'étant connu
-  qu'à l'exécution), un bandeau d'info en tête (nb colonnes/lignes, taille,
-  séparateur, encodage — équivalent du `.file_info` actuel) et un message si
-  tronqué à `MAX_ROWS`. Aucune notion de HTML/CSS : `Style.css` reste utilisé
-  uniquement par le target legacy. Bénéfice structurel : `Text` SwiftUI
+  dynamiques (générées depuis `columnKeys`, plafonnées à `maxColumns` — voir
+  streaming), un bandeau d'info en tête (nb colonnes/lignes, taille, séparateur,
+  encodage — équivalent du `.file_info` actuel) et un message si tronqué en
+  lignes et/ou en colonnes. Aucune notion de HTML/CSS : `Style.css` reste
+  utilisé uniquement par le target legacy. Bénéfice structurel : `Text` SwiftUI
   n'interprète jamais de markup, donc la classe de bug "injection HTML" déjà
-  corrigée sur le legacy devient impossible ici par construction. Pour que
-  `Table`/`ForEach` restent fluides au tri et au défilement, les lignes sont
-  exposées à la vue via un petit wrapper Swift `Identifiable` (id = index de
-  ligne au moment du parsing) plutôt que de rendre `CSVRowObject` lui-même
-  identifiable — on évite ainsi de toucher au modèle Objective-C partagé avec
-  le target legacy.
+  corrigée sur le legacy devient impossible ici par construction.
 - **`CSVThumbnailProvider`** (Swift, `QuickLookCSVThumbnail`) — sous-classe de
   `QLThumbnailProvider`, implémente `provideThumbnail(for:_:)`. Même wrap
-  security-scoped défensif que la Preview Extension. Reprend le dessin Core
-  Graphics existant (grille, alternance de lignes, badge "csv"/"tab"),
+  security-scoped défensif, même `CSVStreamParser`. Reprend le dessin Core
+  Graphics existant (grille, alternance de lignes, badge "csv"/"tab") adapté
+  pour consommer un `ParsedCSVTable` au lieu d'un `CSVDocument`/`CSVRowObject`,
   simplifié : `QLThumbnailReply(contextSize:currentContextDrawing:)` fournit
   déjà un `CGContext` prêt à l'emploi — plus besoin de
   `createRGBABitmapContext`, de gestion manuelle du buffer bitmap, ni du
-  `free()` associé. Le cap `NUM_ROWS` (déjà corrigé côté off-by-one) reste
-  inchangé.
+  `free()` associé. Le cap `NUM_ROWS` (déjà corrigé côté off-by-one côté
+  legacy) reste inchangé côté valeur.
 
 **Flux** : Finder/QuickLook route un fichier `.csv`/`.tsv` (mêmes UTIs
 `public.comma-separated-values-text` / `public.tab-separated-values-text`,
@@ -131,42 +130,78 @@ URL qui n'est pas security-scoped, donc l'ajouter ne coûte rien et couvre le ca
 où il s'avérerait nécessaire. À confirmer empiriquement dès la première
 extension buildée.
 
-**Découpage sans risque d'encodage** : le parseur `NSScanner` actuel gère des
-subtilités (champs entre guillemets contenant des retours à la ligne) qu'un
-simple split ligne-par-ligne casserait. On garde donc la même machine à états,
-mais on la fait tourner sur des chunks d'octets bruts lus au fil de l'eau
-(`NSFileHandle`, ~64 Ko par lecture) au lieu de la chaîne entière — avec une
-différence clé par rapport à un simple découpage par chunks de texte :
+**`CSVStreamParser`, une structure Swift native isolée du legacy** : manipuler
+des flux d'octets bruts implique de l'arithmétique d'index sur des buffers —
+exactement le type de code où une erreur manuelle en Objective-C réintroduirait
+le genre de risque mémoire qu'on vient de corriger sur le target legacy
+(`formatFilesize`). Ce chemin est exclusif aux nouveaux targets (jamais appelé
+par le legacy), donc au lieu de le greffer sur `CSVDocument`, c'est une
+structure Swift entièrement nouvelle et indépendante — `Data`/`Array` en Swift
+sont bornés et vérifiés à l'exécution, contrairement à un pointeur C manuel.
+**Conséquence acceptée** : il existe désormais deux implémentations
+indépendantes de la grammaire CSV (le `NSScanner` en ObjC pour le legacy, ce
+scanner d'octets en Swift pour le neuf) qui doivent rester comportementalement
+identiques sur les cas comme le guillemet échappé (`""`) ou les retours à la
+ligne dans une cellule entre guillemets — risque déjà couvert par le test de
+non-régression prévu (voir Plan de test) qui compare les deux sur les fixtures
+existantes.
+
+Le parseur `NSScanner` actuel gère des subtilités (champs entre guillemets
+contenant des retours à la ligne) qu'un simple split ligne-par-ligne
+casserait. `CSVStreamParser` garde donc la même logique de machine à états,
+mais la fait tourner sur des chunks lus au fil de l'eau (`NSFileHandle`, ~64 Ko
+par lecture) au lieu de la chaîne entière :
 
 - Le memory mapping (`NSDataReadingMappedIfSafe`) a été considéré mais écarté :
   il change uniquement *comment* les octets arrivent depuis le disque
   (pagination transparente par l'OS), pas *où* on découpe le texte pour le
   décoder — le risque de couper au milieu d'un caractère multi-octets existe
   de la même façon qu'avec des chunks lus explicitement.
-- La solution retenue : les caractères structurants du format (séparateur,
-  guillemet, retour ligne — tous des octets ASCII `< 0x80`) ne peuvent **jamais**
-  apparaître comme octet de continuation UTF-8 (`≥ 0x80`), et en ISO-8859-1
-  chaque octet est déjà un caractère complet à lui seul. La machine à états
-  scanne donc les **octets bruts** pour trouver les limites de lignes/cellules
-  — jamais ambigu, quel que soit l'encodage — et ne décode en `NSString` qu'une
-  fois qu'une cellule complète est identifiée, jamais au milieu d'un caractère.
-  Aucune logique de recollage de fragments n'est donc nécessaire.
 - **Détection encodage/séparateur** : faite sur un préfixe borné (~64 Ko, comme
   le font navigateurs/éditeurs pour les gros fichiers) plutôt que sur le
-  fichier entier.
+  fichier entier, avec détection du BOM (`0xEF 0xBB 0xBF` UTF-8, `0xFF 0xFE`
+  UTF-16LE, `0xFE 0xFF` UTF-16BE) en tout début de fichier.
+- **Largeur de scan adaptée à l'encodage (correction du point le plus
+  important de cette revue)** : pour UTF-8/ASCII/ISO-8859-1 (et Shift-JIS), les
+  octets structurants du format (séparateur, guillemet, retour ligne — tous
+  `< 0x80`) ne peuvent **jamais** apparaître comme octet de continuation UTF-8
+  (`≥ 0x80`) ni comme octet de tête/suite Shift-JIS (toujours `≥ 0x40`), et en
+  ISO-8859-1 chaque octet est déjà un caractère complet à lui seul — le scan
+  peut donc se faire **octet par octet** en toute sécurité. **Ce n'est pas vrai
+  pour UTF-16** : un caractère non-ASCII peut y produire par coïncidence
+  l'octet `0x2C` (virgule) ou `0x22` (guillemet) à l'une des deux positions
+  d'une unité de 16 bits (ex. U+222C → octets `[0x2C, 0x22]` en UTF-16LE), ce
+  qui produirait un faux délimiteur avec un scan octet-par-octet. Si le BOM
+  indique de l'UTF-16, `CSVStreamParser` scanne donc par **unités de 16 bits**
+  (stride = 2 octets, endianness du BOM) et compare chaque unité à la valeur de
+  code du délimiteur — jamais un octet isolé — ce qui élimine l'ambiguïté
+  puisque les caractères structurants sont tous des points de code du plan de
+  base sans lien avec les paires de substituts (`0xD800`–`0xDFFF`).
+  Ne décoder en `NSString`/`String` qu'une fois qu'une cellule complète est
+  identifiée (jamais au milieu d'un caractère), quel que soit le stride.
 - **Fiabilité au-delà du préfixe** : si le décodage d'une cellule avec
   l'encodage détecté sur le préfixe échoue (cas d'un fichier ASCII sur les
   premiers 64 Ko puis contenant un octet ISO-8859-1 plus loin), on retente le
   décodage de **cette seule cellule** en ISO-8859-1, qui ne peut jamais échouer
   (tout octet y est un caractère valide) — pas besoin de relancer tout le
   parsing depuis le début.
+- **Plafond mémoire par cellule/ligne** : un guillemet ouvrant jamais refermé
+  ferait accumuler tout le reste du fichier dans une seule cellule sans jamais
+  atteindre `maxRows` (la ligne 1 ne se termine jamais) — l'arrêt anticipé par
+  nombre de lignes ne protège donc pas contre ce cas. `CSVStreamParser` impose
+  une taille maximale (ex. 1 Mo) au buffer d'accumulation d'une cellule ; si
+  dépassée, le parsing s'arrête en erreur plutôt que de continuer à consommer
+  le fichier jusqu'à EOF.
+- **Plafond de colonnes (`maxColumns`, ex. 50)** : un CSV à centaines de
+  colonnes peut faire ramer le rendu natif de `Table` en colonnes dynamiques.
+  Au-delà de `maxColumns`, `CSVStreamParser` continue de reconnaître
+  correctement les limites de cellules/lignes (pour ne pas casser la détection
+  de fin de ligne) mais arrête d'enregistrer de nouvelles clés de colonne ;
+  `ParsedCSVTable` expose un indicateur de troncature horizontale, affiché dans
+  le bandeau d'info au même titre que la troncature de lignes.
 - **Arrêt anticipé** : dès que `maxRows`/`NUM_ROWS` lignes sont capturées, on
   arrête de lire — pour un aperçu limité à 500 lignes, on ne lit typiquement que
   les premiers Ko du fichier, quelle que soit sa taille réelle.
-- Ajout **additif** à `CSVDocument` : nouvelle méthode
-  `numRowsFromFileAtURL:maxRows:error:`. La méthode actuelle basée sur
-  `NSString` (`numRowsFromCSVString:maxRows:error:`) reste intacte et continue
-  à servir le target legacy, inchangé.
 
 ## Gestion des erreurs & cas limites
 
@@ -175,10 +210,15 @@ différence clé par rapport à un simple découpage par chunks de texte :
   parsing (voir streaming). Si la lecture du fichier échoue complètement (accès
   refusé, fichier disparu), on appelle le `completionHandler` avec une
   `NSError` — Quick Look affiche alors un aperçu générique au lieu de rien.
-- **Fichier vide / 0 ligne** : `CSVDocument` retourne déjà une erreur propre.
-  L'aperçu affiche un état "fichier vide" plutôt qu'un tableau vide ; la
-  miniature ne dessine rien (comportement identique à l'actuel, fallback sur
-  l'icône générique).
+- **Fichier vide / 0 ligne** : `CSVStreamParser` retourne une erreur propre
+  (même sémantique que `CSVDocument` côté legacy). L'aperçu affiche un état
+  "fichier vide" plutôt qu'un tableau vide ; la miniature ne dessine rien
+  (comportement identique à l'actuel, fallback sur l'icône générique).
+- **Cellule/ligne malformée dépassant le plafond mémoire** (ex. guillemet non
+  refermé) : `CSVStreamParser` s'arrête en erreur dès que le plafond par
+  cellule est dépassé (voir streaming), plutôt que de continuer à consommer le
+  fichier jusqu'à EOF. Traité comme une erreur de parsing ordinaire — aperçu
+  générique / pas de miniature.
 - **Annulation** : gérée par le système, pas de check manuel nécessaire.
 - **Concurrence** : chaque extension tourne dans son propre processus
   sandboxé géré par le système — le type de hasard cross-thread corrigé sur
@@ -190,10 +230,16 @@ différence clé par rapport à un simple découpage par chunks de texte :
   `test.csv`/`testHeight.csv`/`testWidth.csv`/`testMini.csv` (tri des colonnes,
   redimensionnement, miniature avec badge).
 - **Automatisé** : ajout d'un nouveau target de test avec le framework
-  **Testing**, couvrant `CSVDocument` : guillemets/échappement, auto-détection
-  de séparateur, cap `maxRows`, et le nouveau chemin streaming comparé à
-  l'ancien chemin `NSString` (même résultat attendu sur les fixtures
-  existantes).
+  **Testing**, couvrant :
+  - `CSVDocument` (legacy, inchangé) : guillemets/échappement, auto-détection
+    de séparateur, cap `maxRows`.
+  - `CSVStreamParser` (nouveau) : mêmes cas, plus les cas spécifiques au
+    streaming — UTF-16LE/BE avec caractères produisant un octet ambigu,
+    cellule dépassant le plafond mémoire, dépassement de `maxColumns`.
+  - **Conformité croisée** : sur les fixtures existantes, `CSVStreamParser`
+    doit produire les mêmes lignes/colonnes que `CSVDocument` — garde-fou
+    contre la divergence entre les deux implémentations de la grammaire CSV
+    (voir streaming).
 
 ## Hors périmètre
 
