@@ -955,7 +955,7 @@ final class CSVStreamParser {
     func finish() throws -> ParsedCSVTable {
         if pendingError == nil && !finished {
             if !prefixComplete {
-                finalizePrefixDetection()
+                try finalizePrefixDetection()
             }
             if cellsSeenInCurrentRow > 0 {
                 commitRow()
@@ -1018,7 +1018,7 @@ final class CSVStreamParser {
             prefixBuffer.append(contentsOf: toBuffer)
             remaining = remaining.dropFirst(toBuffer.count)
             if prefixBuffer.count >= configuration.detectionPrefixByteSize {
-                finalizePrefixDetection()
+                try finalizePrefixDetection()
                 if finished { return }
             } else {
                 return
@@ -1049,13 +1049,16 @@ final class CSVStreamParser {
         }
     }
 
-    private func finalizePrefixDetection() {
+    private func finalizePrefixDetection() throws {
         separatorUnit = detectSeparator(in: prefixBuffer)
         isTabSeparated = (separatorUnit == SeparatorCandidate.tab.codeUnit)
         prefixComplete = true
         let buffered = prefixBuffer
         prefixBuffer = []
-        try? consumeUnits(buffered)
+        // Propagate with `try`, not `try?` — swallowing this would rely on
+        // `pendingError` being checked incidentally by a later caller
+        // instead of surfacing the error at the point it actually occurs.
+        try consumeUnits(buffered)
     }
 
     /// Counts each candidate separator only outside quoted spans (using a
@@ -1494,7 +1497,10 @@ import QuickLookUI
 import SwiftUI
 
 final class CSVPreviewViewController: NSViewController, QLPreviewingController {
-    private var hostingController: NSHostingController<CSVPreviewView>?
+    // Type-erased: this hosts either CSVPreviewView (the common case) or
+    // CSVEmptyStateView (the ParseError.emptyFile case), so it can't be
+    // pinned to one NSHostingController<...> generic type.
+    private var hostingController: NSViewController?
 
     override func loadView() {
         view = NSView()
@@ -1509,15 +1515,22 @@ final class CSVPreviewViewController: NSViewController, QLPreviewingController {
             // after that access has already been released and would
             // silently fail or read stale/zero data.
             let table = try CSVStreamParser.parse(fileAt: url, configuration: .preview)
-            showTable(table)
+            show(CSVPreviewView(table: table))
+            handler(nil)
+        } catch CSVStreamParser.ParseError.emptyFile {
+            // The design calls for a dedicated "empty file" state, not the
+            // system's generic fallback preview — handled here rather than
+            // by rethrowing to `handler`, which would hand control back to
+            // Quick Look's own generic UI instead of ours.
+            show(CSVEmptyStateView())
             handler(nil)
         } catch {
             handler(error)
         }
     }
 
-    private func showTable(_ table: ParsedCSVTable) {
-        let hosting = NSHostingController(rootView: CSVPreviewView(table: table))
+    private func show<Content: View>(_ content: Content) {
+        let hosting = NSHostingController(rootView: content)
         hostingController = hosting
 
         addChild(hosting)
@@ -1528,7 +1541,7 @@ final class CSVPreviewViewController: NSViewController, QLPreviewingController {
 }
 ```
 
-- [ ] **Step 6: Implement the SwiftUI view**
+- [ ] **Step 6: Implement the SwiftUI views**
 
 Create `QuickLookCSVPreview/CSVPreviewView.swift`:
 
@@ -1538,6 +1551,19 @@ import SwiftUI
 private struct ColumnKey: Identifiable {
     let id: String
     var key: String { id }
+}
+
+struct CSVEmptyStateView: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "tablecells")
+                .font(.system(size: 32))
+                .foregroundStyle(.secondary)
+            Text("This file is empty")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 }
 
 struct CSVPreviewView: View {
@@ -1552,7 +1578,12 @@ struct CSVPreviewView: View {
             infoBanner
             Table(table.rows) {
                 TableColumnForEach(displayedColumns) { column in
-                    TableColumn(column.key) { row in
+                    // SwiftUI's Table always reserves header row space on
+                    // macOS 13 (no API to hide it) — an empty title avoids
+                    // leaking the parser's internal "col_0", "col_1", ...
+                    // placeholder keys to the user, matching the legacy
+                    // HTML preview, which never showed a header row at all.
+                    TableColumn("") { row in
                         // A single very long field must not wrap to
                         // multiple lines: that would blow out this row's
                         // height in a native Table and badly degrade
@@ -1747,8 +1778,13 @@ final class CSVThumbnailProvider: QLThumbnailProvider {
                 let rowRect = CGRect(x: cellX, y: y, width: columnWidth, height: layout.rowHeight)
 
                 if columnIndex == 0 {
+                    // Paint the full row width in one shot during the
+                    // first column's pass — not just this column's own
+                    // width — otherwise every column past the first is
+                    // left with a transparent background.
+                    let fullRowRect = CGRect(x: 0, y: y, width: layout.size.width, height: layout.rowHeight)
                     (rowIndex % 2 == 0 ? rowBG : altRowBG).setFill()
-                    rowRect.fill()
+                    fullRowRect.fill()
                 } else {
                     borderColor.setStroke()
                     let path = NSBezierPath()
