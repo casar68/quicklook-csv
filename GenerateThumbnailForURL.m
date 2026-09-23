@@ -11,6 +11,12 @@
 #define BADGE_CSV @"csv"
 #define BADGE_TSV @"tab"
 
+// DEPRECATED: QLThumbnailRequestIsCancelled / QLThumbnailRequestCreateContext /
+// QLThumbnailRequestFlushContext (and the whole .qlgenerator CFPlugIn model wired up in main.c)
+// were deprecated in macOS 12 in favor of QLThumbnailReply hosted in a Thumbnail Extension.
+// Left in place for now; migrating to a Thumbnail Extension is planned as a separate, upcoming
+// project.
+
 static CGContextRef createRGBABitmapContext(CGSize pixelSize);
 //static CGContextRef createVectorContext(CGSize pixelSize)
 
@@ -79,7 +85,7 @@ OSStatus GenerateThumbnailForURL(void *thisInterface, QLThumbnailRequestRef thum
 					CGFloat borderWidth = 1.f;
 					
 					// We use NSGraphicsContext for the strings due to easier string drawing :P
-					NSGraphicsContext *nsContext = [NSGraphicsContext graphicsContextWithGraphicsPort:(void *)context flipped:YES];
+					NSGraphicsContext *nsContext = [NSGraphicsContext graphicsContextWithCGContext:context flipped:YES];
 					[NSGraphicsContext setCurrentContext:nsContext];
 					if (nil != nsContext) {
 						NSFont *myFont = [NSFont systemFontOfSize:fontSize];
@@ -188,7 +194,7 @@ OSStatus GenerateThumbnailForURL(void *thisInterface, QLThumbnailRequestRef thum
 					}
 					
 					// Draw the CSV badge to the icon
-					NSGraphicsContext *thumbNsContext = [NSGraphicsContext graphicsContextWithGraphicsPort:(void *)thumbContext flipped:NO];
+					NSGraphicsContext *thumbNsContext = [NSGraphicsContext graphicsContextWithCGContext:thumbContext flipped:NO];
 					[NSGraphicsContext setCurrentContext:thumbNsContext];
 					if (nil != thumbNsContext) {
 						NSString *badgeString = [@"	" isEqualToString:csvDoc.separator] ? BADGE_TSV : BADGE_CSV;
@@ -202,8 +208,8 @@ OSStatus GenerateThumbnailForURL(void *thisInterface, QLThumbnailRequestRef thum
 						
 						// Set attributes and draw
 						NSDictionary *badgeAttributes = @{NSFontAttributeName: badgeFont,
-														 NSForegroundColorAttributeName: badgeColor,
-														 NSShadowAttributeName: badgeShadow};
+														  NSForegroundColorAttributeName: badgeColor,
+														  NSShadowAttributeName: badgeShadow};
 						
 						NSSize badgeSize = [badgeString sizeWithAttributes:badgeAttributes];
 						CGFloat badge_x = (usedBounds.size.width / 2) - (badgeSize.width / 2);
@@ -238,7 +244,7 @@ static CGContextRef createRGBABitmapContext(CGSize pixelSize)
 {
 	NSUInteger width = pixelSize.width;
 	NSUInteger height = pixelSize.height;
-	NSUInteger bitmapBytesPerRow = width * 4;				// 1 byte per component r g b a
+	NSUInteger bitmapBytesPerRow = width * 4;			// 1 byte per component r g b a
 	NSUInteger bitmapBytes = bitmapBytesPerRow * height;
 	
 	// allocate needed bytes
@@ -250,7 +256,7 @@ static CGContextRef createRGBABitmapContext(CGSize pixelSize)
 	
 	// create the context
 	CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceGenericRGB);
-	CGContextRef context = CGBitmapContextCreate(bitmapData, width, height, 8, bitmapBytesPerRow, colorSpace, kCGImageAlphaPremultipliedLast);
+	CGContextRef context = CGBitmapContextCreate(bitmapData, width, height, 8, bitmapBytesPerRow, colorSpace, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
 	CGColorSpaceRelease(colorSpace);
 	
 	// context creation fail

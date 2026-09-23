@@ -173,15 +173,17 @@
 			}
 			
 			
-			// one row scanned - add to the lines array
-			if ([columns count] > 0) {
-				CSVRowObject *newRow = [CSVRowObject newWithDictionary:columns];
-				[thisRows addObject:newRow];
-			}
-			
+			// one row scanned; count it first so the maxRows cap below is applied
+			// before the row is added, not after (otherwise one row too many gets kept)
 			numRows++;
 			if ((maxRows > 0) && (numRows > maxRows)) {
 				break;
+			}
+			
+			// add to the lines array
+			if ([columns count] > 0) {
+				CSVRowObject *newRow = [CSVRowObject rowWithDictionary:columns];
+				[thisRows addObject:newRow];
 			}
 		}
 		
@@ -192,7 +194,7 @@
 	
 	// empty string
 	else if (nil != error) {
-		NSDictionary *errorDict = @{@"userInfo": @"Cannot parse an empty string"};
+		NSDictionary *errorDict = @{NSLocalizedDescriptionKey: @"Cannot parse an empty string"};
 		*error = [NSError errorWithDomain:NSCocoaErrorDomain code:1 userInfo:errorDict];
 	}
 	
