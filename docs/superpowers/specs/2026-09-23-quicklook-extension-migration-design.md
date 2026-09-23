@@ -38,7 +38,9 @@ Graphics existant.
 | Devenir du legacy | Conservé en parallèle pour l'instant ; suppression prévue dans une PR ultérieure séparée |
 | Rendu de l'aperçu | SwiftUI natif (`Table`, via `NSHostingController`) — pas de HTML/WebView |
 | Rendu de la miniature | Core Graphics existant, réutilisé quasiment tel quel |
-| Lecture de fichier | Passage en streaming (voir section dédiée), à la fois pour la Preview et la Thumbnail Extension |
+| Lecture de fichier | Streaming par scan d'octets bruts + fallback d'encodage par cellule (voir section dédiée), pour la Preview et la Thumbnail Extension |
+| Accès fichier sandbox | Appel défensif `startAccessingSecurityScopedResource()`/`stopAccessingSecurityScopedResource()` autour de la lecture (coût nul si non applicable ; à confirmer empiriquement, voir section streaming) |
+| Partage code `CSVDocument`/`CSVRowObject` | Multi-target membership (pas de framework/Swift Package séparé pour l'instant — à revisiter si le code partagé grossit significativement) |
 | Tests | Ajout d'un target de test (framework **Testing**) — absent aujourd'hui du projet |
 
 ## Architecture & targets
@@ -62,19 +64,27 @@ legacy (inchangé) :
 **Code partagé** : `CSVDocument.h/.m` et `CSVRowObject.h/.m` restent en
 Objective-C, inchangés dans leur API existante (voir section streaming pour
 l'ajout additif), et sont ajoutés comme membres des deux nouveaux targets
-d'extension (pas de duplication) via un bridging header côté Swift.
+d'extension via un bridging header côté Swift. Chaque extension étant un
+exécutable séparé, ce code est de toute façon compilé dans chacun des bundles
+qui le consomment, que le partage se fasse par membership direct ou via un
+framework embarqué — le multi-target membership reste donc le choix le plus
+simple pour ce volume de code (~250 lignes, 2 targets consommateurs). Un
+Swift Package local (approche recommandée par Apple pour la modularité
+inter-targets) sera envisagé si ce code partagé grossit significativement.
 
 ## Composants & flux de données
 
 - **`CSVPreviewViewController`** (Swift, `QuickLookCSVPreview`) — conforme à
   `QLPreviewingController`, implémente
-  `preparePreviewOfFile(at:completionHandler:)`. Reprend la même logique de
+  `preparePreviewOfFile(at:completionHandler:)`. Enrobe la lecture d'un
+  `startAccessingSecurityScopedResource()`/`stopAccessingSecurityScopedResource()`
+  défensif (voir streaming pour le détail), reprend la même logique de
   détection d'encodage que l'actuel `GeneratePreviewForURL.m` (UTF-8/natif →
-  fallback ISO-8859-1, désormais sur préfixe borné — voir streaming), parse via
-  `CSVDocument`, puis construit un view-model (`rows`, `columnKeys`, taille
-  fichier, séparateur, encodage) passé à la vue SwiftUI. Pas de vérification de
-  cancellation à faire manuellement : le nouveau modèle d'extension gère lui-même
-  l'annulation/le teardown.
+  fallback ISO-8859-1, désormais sur préfixe borné avec repli par cellule — voir
+  streaming), parse via `CSVDocument`, puis construit un view-model (`rows`,
+  `columnKeys`, taille fichier, séparateur, encodage) passé à la vue SwiftUI.
+  Pas de vérification de cancellation à faire manuellement : le nouveau modèle
+  d'extension gère lui-même l'annulation/le teardown.
 - **`CSVPreviewView`** (SwiftUI) — un `Table` macOS natif avec colonnes
   dynamiques (générées depuis `columnKeys`, le nombre de colonnes n'étant connu
   qu'à l'exécution), un bandeau d'info en tête (nb colonnes/lignes, taille,
@@ -82,12 +92,18 @@ d'extension (pas de duplication) via un bridging header côté Swift.
   tronqué à `MAX_ROWS`. Aucune notion de HTML/CSS : `Style.css` reste utilisé
   uniquement par le target legacy. Bénéfice structurel : `Text` SwiftUI
   n'interprète jamais de markup, donc la classe de bug "injection HTML" déjà
-  corrigée sur le legacy devient impossible ici par construction.
+  corrigée sur le legacy devient impossible ici par construction. Pour que
+  `Table`/`ForEach` restent fluides au tri et au défilement, les lignes sont
+  exposées à la vue via un petit wrapper Swift `Identifiable` (id = index de
+  ligne au moment du parsing) plutôt que de rendre `CSVRowObject` lui-même
+  identifiable — on évite ainsi de toucher au modèle Objective-C partagé avec
+  le target legacy.
 - **`CSVThumbnailProvider`** (Swift, `QuickLookCSVThumbnail`) — sous-classe de
-  `QLThumbnailProvider`, implémente `provideThumbnail(for:_:)`. Reprend le
-  dessin Core Graphics existant (grille, alternance de lignes, badge
-  "csv"/"tab"), simplifié : `QLThumbnailReply(contextSize:currentContextDrawing:)`
-  fournit déjà un `CGContext` prêt à l'emploi — plus besoin de
+  `QLThumbnailProvider`, implémente `provideThumbnail(for:_:)`. Même wrap
+  security-scoped défensif que la Preview Extension. Reprend le dessin Core
+  Graphics existant (grille, alternance de lignes, badge "csv"/"tab"),
+  simplifié : `QLThumbnailReply(contextSize:currentContextDrawing:)` fournit
+  déjà un `CGContext` prêt à l'emploi — plus besoin de
   `createRGBABitmapContext`, de gestion manuelle du buffer bitmap, ni du
   `free()` associé. Le cap `NUM_ROWS` (déjà corrigé côté off-by-one) reste
   inchangé.
@@ -106,19 +122,44 @@ l'ancien plugin — un CSV de plusieurs Go chargé entièrement en mémoire
 tuer l'extension par le système (jetsam) avant même qu'elle ait pu répondre.
 Puisqu'on réécrit ce chemin pour la migration, on en profite pour le corriger.
 
-Le parseur `NSScanner` actuel gère des subtilités (champs entre guillemets
-contenant des retours à la ligne) qu'un simple split ligne-par-ligne casserait.
-On garde donc la même machine à états, mais on la fait tourner sur des chunks
-lus au fil de l'eau (`NSFileHandle`, ~64 Ko par lecture) au lieu de la chaîne
-entière :
+**Accès fichier** : la lecture est enrobée d'un
+`startAccessingSecurityScopedResource()` / `stopAccessingSecurityScopedResource()`
+défensif. Les échantillons Apple pour les Preview/Thumbnail Extensions n'appellent
+pas cette API — l'accès à l'URL fournie par le système semble déjà accordé pour
+la durée de la requête — mais l'appel est sans effet (retourne `false`) sur une
+URL qui n'est pas security-scoped, donc l'ajouter ne coûte rien et couvre le cas
+où il s'avérerait nécessaire. À confirmer empiriquement dès la première
+extension buildée.
 
+**Découpage sans risque d'encodage** : le parseur `NSScanner` actuel gère des
+subtilités (champs entre guillemets contenant des retours à la ligne) qu'un
+simple split ligne-par-ligne casserait. On garde donc la même machine à états,
+mais on la fait tourner sur des chunks d'octets bruts lus au fil de l'eau
+(`NSFileHandle`, ~64 Ko par lecture) au lieu de la chaîne entière — avec une
+différence clé par rapport à un simple découpage par chunks de texte :
+
+- Le memory mapping (`NSDataReadingMappedIfSafe`) a été considéré mais écarté :
+  il change uniquement *comment* les octets arrivent depuis le disque
+  (pagination transparente par l'OS), pas *où* on découpe le texte pour le
+  décoder — le risque de couper au milieu d'un caractère multi-octets existe
+  de la même façon qu'avec des chunks lus explicitement.
+- La solution retenue : les caractères structurants du format (séparateur,
+  guillemet, retour ligne — tous des octets ASCII `< 0x80`) ne peuvent **jamais**
+  apparaître comme octet de continuation UTF-8 (`≥ 0x80`), et en ISO-8859-1
+  chaque octet est déjà un caractère complet à lui seul. La machine à états
+  scanne donc les **octets bruts** pour trouver les limites de lignes/cellules
+  — jamais ambigu, quel que soit l'encodage — et ne décode en `NSString` qu'une
+  fois qu'une cellule complète est identifiée, jamais au milieu d'un caractère.
+  Aucune logique de recollage de fragments n'est donc nécessaire.
 - **Détection encodage/séparateur** : faite sur un préfixe borné (~64 Ko, comme
   le font navigateurs/éditeurs pour les gros fichiers) plutôt que sur le
   fichier entier.
-- **Parsing** : on accumule les chunks dans un buffer et on relance le scan
-  progressivement, en ne committant que les lignes complètes ; un champ entre
-  guillemets qui traverse une frontière de chunk est simplement complété par le
-  chunk suivant avant d'être re-scanné.
+- **Fiabilité au-delà du préfixe** : si le décodage d'une cellule avec
+  l'encodage détecté sur le préfixe échoue (cas d'un fichier ASCII sur les
+  premiers 64 Ko puis contenant un octet ISO-8859-1 plus loin), on retente le
+  décodage de **cette seule cellule** en ISO-8859-1, qui ne peut jamais échouer
+  (tout octet y est un caractère valide) — pas besoin de relancer tout le
+  parsing depuis le début.
 - **Arrêt anticipé** : dès que `maxRows`/`NUM_ROWS` lignes sont capturées, on
   arrête de lire — pour un aperçu limité à 500 lignes, on ne lit typiquement que
   les premiers Ko du fichier, quelle que soit sa taille réelle.
@@ -130,9 +171,10 @@ entière :
 ## Gestion des erreurs & cas limites
 
 - **Encodage/lecture** : même chaîne de fallback qu'avant (UTF-8/natif →
-  ISO-8859-1, désormais sur préfixe borné). Si les deux échouent, on appelle le
-  `completionHandler` avec une `NSError` — Quick Look affiche alors un aperçu
-  générique au lieu de rien.
+  ISO-8859-1), détectée sur préfixe borné puis re-vérifiée par cellule au fil du
+  parsing (voir streaming). Si la lecture du fichier échoue complètement (accès
+  refusé, fichier disparu), on appelle le `completionHandler` avec une
+  `NSError` — Quick Look affiche alors un aperçu générique au lieu de rien.
 - **Fichier vide / 0 ligne** : `CSVDocument` retourne déjà une erreur propre.
   L'aperçu affiche un état "fichier vide" plutôt qu'un tableau vide ; la
   miniature ne dessine rien (comportement identique à l'actuel, fallback sur
