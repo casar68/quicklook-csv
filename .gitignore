@@ -16,4 +16,6 @@ DerivedData
 .idea/
 *.hmap
 .superpowers/
+.build/
+*.profraw
 

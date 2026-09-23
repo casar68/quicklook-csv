@@ -188,7 +188,7 @@ final class CSVStreamParser {
             index += width
 
             process(unit: u, rawBytes: raw)
-            if finished { break }
+            if finished { return }
         }
         if let error = pendingError {
             finished = true

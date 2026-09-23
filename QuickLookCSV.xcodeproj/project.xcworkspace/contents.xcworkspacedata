@@ -14,5 +14,8 @@
    <Group
       location = "group:QuickLookCSVTests"
       name = "QuickLookCSVTests">
+      <FileRef
+         location = "group:CSVStreamParserTests.swift">
+      </FileRef>
    </Group>
 </Workspace>

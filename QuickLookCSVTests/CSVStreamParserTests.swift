@@ -148,4 +148,78 @@ struct CSVStreamParserTests {
         }
         #expect(stoppedEarly == true)
     }
+
+    private func utf16LEBytes(_ string: String, bom: Bool = true) -> [UInt8] {
+        var bytes: [UInt8] = bom ? [0xFF, 0xFE] : []
+        for scalar in string.utf16 {
+            bytes.append(UInt8(scalar & 0xFF))
+            bytes.append(UInt8(scalar >> 8))
+        }
+        return bytes
+    }
+
+    @Test func parsesUTF16LEFileWithBOM() throws {
+        let parser = CSVStreamParser(configuration: .preview)
+        _ = try parser.consume(utf16LEBytes("a,b\n1,2\n"))
+        let table = try parser.finish()
+        #expect(table.rows.count == 2)
+        #expect(table.rows[1].value(forColumnKey: "col_1") == "2")
+    }
+
+    @Test func utf16CharacterWithCommaByteValueIsNotMistakenForADelimiter() throws {
+        // U+222C (∬) encodes in UTF-16LE as bytes [0x2C, 0x22] — the first
+        // byte equals the ASCII comma. A byte-level scan would misparse
+        // this; a unit-level scan must not.
+        let parser = CSVStreamParser(configuration: .preview)
+        let content = "a\u{222C}b,c\n" // "a∬b,c\n"
+        _ = try parser.consume(utf16LEBytes(content))
+        let table = try parser.finish()
+        #expect(table.rows.count == 1)
+        #expect(table.rows[0].value(forColumnKey: "col_0") == "a\u{222C}b")
+        #expect(table.rows[0].value(forColumnKey: "col_1") == "c")
+    }
+
+    @Test func utf16UnitSplitAcrossChunkBoundaryIsHandledCorrectly() throws {
+        let parser = CSVStreamParser(configuration: .preview)
+        let bytes = utf16LEBytes("a,b\n1,2\n")
+        // Split in the middle of a 2-byte unit (odd offset) to exercise the
+        // leftover-byte carry logic.
+        let splitPoint = 5
+        _ = try parser.consume(Array(bytes[0..<splitPoint]))
+        _ = try parser.consume(Array(bytes[splitPoint...]))
+        let table = try parser.finish()
+        #expect(table.rows.count == 2)
+        #expect(table.rows[1].value(forColumnKey: "col_1") == "2")
+    }
+
+    @Test func cellDecodeFallsBackToISOLatin1BeyondDetectionPrefix() throws {
+        var config = CSVStreamParser.Configuration.preview
+        config.detectionPrefixByteSize = 4 // force the prefix window to be tiny
+        let parser = CSVStreamParser(configuration: config)
+        // Prefix ("a,b\n") is pure ASCII so UTF-8 is chosen; the later byte
+        // 0xE9 alone is not valid UTF-8 but is a valid ISO-8859-1 "é".
+        var bytes = Array("a,b\n".utf8)
+        bytes.append(contentsOf: [0xE9, 0x0A]) // "é\n" in ISO-8859-1
+        _ = try parser.consume(bytes)
+        let table = try parser.finish()
+        #expect(table.rows.count == 2)
+        #expect(table.rows[1].value(forColumnKey: "col_0") == "é")
+    }
+
+    @Test func utf16DecodeFailureDoesNotFallBackToISOLatin1() throws {
+        // The ISO-8859-1 fallback must be confined to the single-byte
+        // stride. Feeding it 2-byte UTF-16 cell bytes would produce
+        // mojibake (every byte reinterpreted as its own Latin-1 character,
+        // including embedded NUL bytes) instead of an empty/best-effort
+        // result.
+        let parser = CSVStreamParser(configuration: .preview)
+        var bytes: [UInt8] = [0xFF, 0xFE]       // UTF-16LE BOM
+        bytes.append(contentsOf: [0x61, 0x00])  // "a"
+        bytes.append(contentsOf: [0x2C, 0x00])  // ","
+        bytes.append(contentsOf: [0x00, 0xDC])  // lone low surrogate U+DC00 — invalid UTF-16 on its own
+        bytes.append(contentsOf: [0x0A, 0x00])  // "\n"
+        _ = try parser.consume(bytes)
+        let table = try parser.finish()
+        #expect(table.rows[0].value(forColumnKey: "col_1").contains("\0") == false)
+    }
 }
