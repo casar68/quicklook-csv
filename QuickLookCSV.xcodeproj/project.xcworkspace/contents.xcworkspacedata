@@ -22,4 +22,14 @@
       location = "group:QuickLookCSVApp"
       name = "QuickLookCSVApp">
    </Group>
+   <Group
+      location = "group:QuickLookCSVPreview"
+      name = "QuickLookCSVPreview">
+      <FileRef
+         location = "group:CSVPreviewViewController.swift">
+      </FileRef>
+      <FileRef
+         location = "group:CSVPreviewView.swift">
+      </FileRef>
+   </Group>
 </Workspace>
