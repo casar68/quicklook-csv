@@ -101,6 +101,19 @@ final class CSVStreamParser {
 
     func finish() throws -> ParsedCSVTable {
         if pendingError == nil && !finished {
+            if !strideDetermined && !bomSniffBuffer.isEmpty {
+                // The whole stream was 0-1 bytes, so `determineStride` never
+                // saw the 2 bytes it needs to conclusively check for a BOM,
+                // and those bytes are stranded in `bomSniffBuffer` (never
+                // reaching `feed`/`prefixBuffer`). A BOM can never be
+                // detected from fewer than 2 bytes anyway, so treat what
+                // arrived as single-byte-stride data and feed it through
+                // normally instead of silently dropping it.
+                stride = .singleByte
+                strideDetermined = true
+                try feed(bomSniffBuffer)
+                bomSniffBuffer = []
+            }
             if !prefixComplete {
                 try finalizePrefixDetection()
             }

@@ -180,15 +180,29 @@ struct CSVStreamParserTests {
     }
 
     @Test func utf16UnitSplitAcrossChunkBoundaryIsHandledCorrectly() throws {
-        let parser = CSVStreamParser(configuration: .preview)
+        // With the default `.preview` config (detectionPrefixByteSize:
+        // 65_536), this whole 18-byte input would be fully absorbed by
+        // prefix buffering inside a single `feed()` call before
+        // `consumeUnits` ever ran on it in two separate pieces -- so a split
+        // at any offset would never actually exercise the `leftoverByte`
+        // carry between two `consume()` calls. To exercise it for real, use
+        // a tiny `detectionPrefixByteSize` so prefix detection completes
+        // partway through the FIRST `consume()` call, and place the split
+        // point one byte after that -- landing on the first byte of a 2-byte
+        // unit ("b"'s low byte) so its second byte only arrives in the
+        // SECOND `consume()` call and must be carried via `leftoverByte`.
+        var config = CSVStreamParser.Configuration.preview
+        config.detectionPrefixByteSize = 4 // "a," (2 units) -- completes prefix detection mid-first-call
+        let parser = CSVStreamParser(configuration: config)
         let bytes = utf16LEBytes("a,b\n1,2\n")
-        // Split in the middle of a 2-byte unit (odd offset) to exercise the
-        // leftover-byte carry logic.
-        let splitPoint = 5
+        // bytes = BOM(2) + "a"(2) + ","(2) + "b"(2) + "\n"(2) + "1"(2) + ","(2) + "2"(2) + "\n"(2) = 18 bytes.
+        // splitPoint 7 = BOM(2) + "a,"(4) + the first byte of "b"'s 2-byte unit (1).
+        let splitPoint = 7
         _ = try parser.consume(Array(bytes[0..<splitPoint]))
         _ = try parser.consume(Array(bytes[splitPoint...]))
         let table = try parser.finish()
         #expect(table.rows.count == 2)
+        #expect(table.rows[0].value(forColumnKey: "col_1") == "b")
         #expect(table.rows[1].value(forColumnKey: "col_1") == "2")
     }
 
@@ -221,5 +235,27 @@ struct CSVStreamParserTests {
         _ = try parser.consume(bytes)
         let table = try parser.finish()
         #expect(table.rows[0].value(forColumnKey: "col_1").contains("\0") == false)
+    }
+
+    @Test func singleByteTotalInputIsNotSilentlyDropped() throws {
+        // A stream of only 0-1 bytes never gives `determineStride` the 2
+        // bytes it needs to conclusively rule a BOM in or out, so those
+        // bytes get stuck in `bomSniffBuffer` and never reach
+        // `feed`/`prefixBuffer`. Without a flush in `finish()`, this would
+        // silently produce an empty table (0 rows) instead of surfacing the
+        // file's real (if minimal) content, even though `sawAnyByte` is
+        // `true` so `.emptyFile` isn't thrown either.
+        //
+        // Tracing the actual parse of a lone "," with no trailing newline:
+        // `finish()` flushes the single byte as single-byte-stride data,
+        // prefix detection sees one comma (picks comma as the separator),
+        // `consumeUnits` processes it as a separator hit (finalizing an
+        // empty cell before it), and then `finish()`'s existing
+        // `cellsSeenInCurrentRow > 0` check commits the row, finalizing a
+        // second empty cell after it -- one row, two empty cells.
+        let table = try parseAll(",")
+        #expect(table.rows.count == 1)
+        #expect(table.rows[0].value(forColumnKey: "col_0") == "")
+        #expect(table.rows[0].value(forColumnKey: "col_1") == "")
     }
 }
