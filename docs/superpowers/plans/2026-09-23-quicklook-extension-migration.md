@@ -780,8 +780,8 @@ Append to `CSVStreamParserTests`:
         let parser = CSVStreamParser(configuration: .preview)
         _ = try parser.consume(utf16LEBytes("a,b\n1,2\n"))
         let table = try parser.finish()
-        #expect(table.rows.count == 1)
-        #expect(table.rows[0].value(forColumnKey: "col_1") == "2")
+        #expect(table.rows.count == 2)
+        #expect(table.rows[1].value(forColumnKey: "col_1") == "2")
     }
 
     @Test func utf16CharacterWithCommaByteValueIsNotMistakenForADelimiter() throws {
@@ -806,8 +806,8 @@ Append to `CSVStreamParserTests`:
         _ = try parser.consume(Array(bytes[0..<splitPoint]))
         _ = try parser.consume(Array(bytes[splitPoint...]))
         let table = try parser.finish()
-        #expect(table.rows.count == 1)
-        #expect(table.rows[0].value(forColumnKey: "col_1") == "2")
+        #expect(table.rows.count == 2)
+        #expect(table.rows[1].value(forColumnKey: "col_1") == "2")
     }
 
     @Test func cellDecodeFallsBackToISOLatin1BeyondDetectionPrefix() throws {
@@ -1041,7 +1041,15 @@ final class CSVStreamParser {
             index += width
 
             process(unit: u, rawBytes: raw)
-            if finished { break }
+            // `return`, not `break`: a mid-loop error (e.g. cellTooLarge)
+            // must skip the throw below and defer to finish(), matching
+            // every earlier task's contract — consume() never throws for
+            // a data error, only finish() does. `break` would fall through
+            // to the throw and make consume() throw immediately instead,
+            // breaking existing callers (e.g. the maxCellByteSize test in
+            // Task 4) that call consume() directly and expect a Bool, not
+            // a thrown error, when the cap is hit mid-stream.
+            if finished { return }
         }
         if let error = pendingError {
             finished = true

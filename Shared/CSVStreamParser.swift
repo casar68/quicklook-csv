@@ -44,8 +44,25 @@ final class CSVStreamParser {
         }
     }
 
+    private enum Stride {
+        case singleByte
+        case utf16LittleEndian
+        case utf16BigEndian
+    }
+
     private let configuration: Configuration
 
+    private var strideDetermined = false
+    private var stride: Stride = .singleByte
+    private var bomSniffBuffer: [UInt8] = []
+    private var leftoverByte: UInt8?
+
+    private var separatorUnit: UInt16 = SeparatorCandidate.comma.codeUnit
+    private var prefixBuffer: [UInt8] = []
+    private var prefixComplete = false
+
+    private var insideQuotes = false
+    private var pendingCloseQuote = false
     private var cellBytes: [UInt8] = []
     private var currentRowValues: [String] = []
     private var cellsSeenInCurrentRow = 0
@@ -57,11 +74,6 @@ final class CSVStreamParser {
     private var sawAnyByte = false
     private var finished = false
     private var pendingError: ParseError?
-    private var insideQuotes = false
-    private var pendingCloseQuote = false
-    private var separatorUnit: UInt16 = SeparatorCandidate.comma.codeUnit
-    private var prefixBuffer: [UInt8] = []
-    private var prefixComplete = false
     private var isTabSeparated = false
 
     init(configuration: Configuration) {
@@ -72,14 +84,25 @@ final class CSVStreamParser {
         guard !finished else { return true }
         guard !chunk.isEmpty else { return finished }
         sawAnyByte = true
-        try feed(chunk)
+
+        var remaining = chunk
+        if !strideDetermined {
+            determineStride(from: &remaining)
+            guard strideDetermined else { return finished }
+        } else if let leftover = leftoverByte {
+            remaining = [leftover] + remaining
+            leftoverByte = nil
+        }
+        guard !remaining.isEmpty else { return finished }
+
+        try feed(remaining)
         return finished
     }
 
     func finish() throws -> ParsedCSVTable {
         if pendingError == nil && !finished {
             if !prefixComplete {
-                finalizePrefixDetection()
+                try finalizePrefixDetection()
             }
             if cellsSeenInCurrentRow > 0 {
                 commitRow()
@@ -99,22 +122,73 @@ final class CSVStreamParser {
         )
     }
 
+    private func determineStride(from chunk: inout [UInt8]) {
+        let needed = 2 - bomSniffBuffer.count
+        if needed > 0 {
+            let take = min(needed, chunk.count)
+            bomSniffBuffer.append(contentsOf: chunk.prefix(take))
+            chunk.removeFirst(take)
+        }
+        guard bomSniffBuffer.count == 2 else { return }
+
+        if bomSniffBuffer == [0xFF, 0xFE] {
+            stride = .utf16LittleEndian
+        } else if bomSniffBuffer == [0xFE, 0xFF] {
+            stride = .utf16BigEndian
+        } else {
+            stride = .singleByte
+            chunk = bomSniffBuffer + chunk
+        }
+        strideDetermined = true
+    }
+
+    private func unitWidth() -> Int {
+        stride == .singleByte ? 1 : 2
+    }
+
+    private func unit(at index: Int, in bytes: [UInt8]) -> UInt16 {
+        switch stride {
+        case .singleByte:
+            return UInt16(bytes[index])
+        case .utf16LittleEndian:
+            return UInt16(bytes[index]) | (UInt16(bytes[index + 1]) << 8)
+        case .utf16BigEndian:
+            return (UInt16(bytes[index]) << 8) | UInt16(bytes[index + 1])
+        }
+    }
+
     private func feed(_ bytes: [UInt8]) throws {
         var remaining = bytes[...]
         if !prefixComplete {
             let room = configuration.detectionPrefixByteSize - prefixBuffer.count
-            let toBuffer = remaining.prefix(room)
+            let toBuffer = remaining.prefix(max(room, 0))
             prefixBuffer.append(contentsOf: toBuffer)
             remaining = remaining.dropFirst(toBuffer.count)
             if prefixBuffer.count >= configuration.detectionPrefixByteSize {
-                finalizePrefixDetection()
+                try finalizePrefixDetection()
+                if finished { return }
             } else {
                 return
             }
         }
-        for byte in remaining {
-            process(unit: UInt16(byte))
-            if finished { return }
+        try consumeUnits(Array(remaining))
+    }
+
+    private func consumeUnits(_ bytes: [UInt8]) throws {
+        let width = unitWidth()
+        var index = 0
+        while index < bytes.count {
+            if width == 2 && index + 1 >= bytes.count {
+                leftoverByte = bytes[index]
+                index += 1
+                break
+            }
+            let u = unit(at: index, in: bytes)
+            let raw = Array(bytes[index..<(index + width)])
+            index += width
+
+            process(unit: u, rawBytes: raw)
+            if finished { break }
         }
         if let error = pendingError {
             finished = true
@@ -122,16 +196,63 @@ final class CSVStreamParser {
         }
     }
 
-    private func process(unit: UInt16) {
+    private func finalizePrefixDetection() throws {
+        separatorUnit = detectSeparator(in: prefixBuffer)
+        isTabSeparated = (separatorUnit == SeparatorCandidate.tab.codeUnit)
+        prefixComplete = true
+        let buffered = prefixBuffer
+        prefixBuffer = []
+        // Propagate with `try`, not `try?` — swallowing this would rely on
+        // `pendingError` being checked incidentally by a later caller
+        // instead of surfacing the error at the point it actually occurs.
+        try consumeUnits(buffered)
+    }
+
+    /// Counts each candidate separator only outside quoted spans (using a
+    /// plain quote-toggle, not the full "" escape handling `process` uses —
+    /// sufficient for this detection heuristic). Without this, a quoted
+    /// field's internal punctuation (e.g. a long comma-separated sentence
+    /// quoted in an otherwise tab-separated file) could outvote the real
+    /// separator.
+    private func detectSeparator(in bytes: [UInt8]) -> UInt16 {
+        let width = unitWidth()
+        var counts: [UInt16: Int] = [:]
+        for candidate in SeparatorCandidate.allCases {
+            counts[candidate.codeUnit] = 0
+        }
+
+        var insideQuotesForDetection = false
+        var index = 0
+        while index + width <= bytes.count {
+            let u = unit(at: index, in: bytes)
+            if u == Unit.quote {
+                insideQuotesForDetection.toggle()
+            } else if !insideQuotesForDetection, counts[u] != nil {
+                counts[u, default: 0] += 1
+            }
+            index += width
+        }
+
+        var best = SeparatorCandidate.comma.codeUnit
+        var bestCount = counts[best] ?? 0
+        for candidate in SeparatorCandidate.allCases where candidate != .comma {
+            let candidateCount = counts[candidate.codeUnit] ?? 0
+            if candidateCount > bestCount {
+                best = candidate.codeUnit
+                bestCount = candidateCount
+            }
+        }
+        return best
+    }
+
+    private func process(unit: UInt16, rawBytes: [UInt8]) {
         if pendingCloseQuote {
             pendingCloseQuote = false
             if unit == Unit.quote {
-                appendToCell(unit: unit)
+                appendToCell(rawBytes)
                 insideQuotes = true
                 return
             }
-            // Field really closed; insideQuotes is already false. Fall
-            // through to process this unit normally below.
         }
 
         if unit == Unit.quote {
@@ -156,13 +277,13 @@ final class CSVStreamParser {
             }
         } else {
             justSawCR = false
-            appendToCell(unit: unit)
+            appendToCell(rawBytes)
         }
     }
 
-    private func appendToCell(unit: UInt16) {
+    private func appendToCell(_ rawBytes: [UInt8]) {
         guard cellsSeenInCurrentRow < configuration.maxColumns else { return }
-        cellBytes.append(UInt8(unit))
+        cellBytes.append(contentsOf: rawBytes)
         if cellBytes.count > configuration.maxCellByteSize {
             pendingError = .cellTooLarge
             finished = true
@@ -171,10 +292,29 @@ final class CSVStreamParser {
 
     private func finalizeCurrentCell() {
         if cellsSeenInCurrentRow < configuration.maxColumns {
-            currentRowValues.append(String(decoding: cellBytes, as: UTF8.self))
+            currentRowValues.append(decodeCell(cellBytes))
         }
         cellBytes.removeAll(keepingCapacity: true)
         cellsSeenInCurrentRow += 1
+    }
+
+    private func decodeCell(_ bytes: [UInt8]) -> String {
+        switch stride {
+        case .singleByte:
+            // ISO-8859-1 never fails to decode (every byte is a valid code
+            // point), so this fallback only makes sense — and is only
+            // applied — for the 1-byte-per-unit encodings. Falling back to
+            // it for 2-byte UTF-16 bytes would reinterpret each byte as its
+            // own Latin-1 character and produce mojibake.
+            if let decoded = String(bytes: bytes, encoding: .utf8) {
+                return decoded
+            }
+            return String(bytes: bytes, encoding: .isoLatin1) ?? ""
+        case .utf16LittleEndian:
+            return String(bytes: bytes, encoding: .utf16LittleEndian) ?? ""
+        case .utf16BigEndian:
+            return String(bytes: bytes, encoding: .utf16BigEndian) ?? ""
+        }
     }
 
     private func commitRow() {
@@ -198,52 +338,5 @@ final class CSVStreamParser {
 
         currentRowValues.removeAll(keepingCapacity: true)
         cellsSeenInCurrentRow = 0
-    }
-
-    private func finalizePrefixDetection() {
-        separatorUnit = detectSeparator(in: prefixBuffer)
-        isTabSeparated = (separatorUnit == SeparatorCandidate.tab.codeUnit)
-        prefixComplete = true
-        let buffered = prefixBuffer
-        prefixBuffer = []
-        for byte in buffered {
-            process(unit: UInt16(byte))
-            if finished { return }
-        }
-    }
-
-    /// Counts each candidate separator only outside quoted spans. A raw,
-    /// quote-unaware count would let a quoted field's internal punctuation
-    /// (e.g. a long comma-separated sentence quoted in an otherwise
-    /// tab-separated file) outvote the real separator. This uses a plain
-    /// quote-toggle (not the full "" escape handling `process` uses) —
-    /// good enough for a detection heuristic; the real parse in `process`
-    /// is unaffected and stays fully correct.
-    private func detectSeparator(in bytes: [UInt8]) -> UInt16 {
-        var counts: [UInt16: Int] = [:]
-        for candidate in SeparatorCandidate.allCases {
-            counts[candidate.codeUnit] = 0
-        }
-
-        var insideQuotesForDetection = false
-        for byte in bytes {
-            let u = UInt16(byte)
-            if u == Unit.quote {
-                insideQuotesForDetection.toggle()
-            } else if !insideQuotesForDetection, counts[u] != nil {
-                counts[u, default: 0] += 1
-            }
-        }
-
-        var best = SeparatorCandidate.comma.codeUnit
-        var bestCount = counts[best] ?? 0
-        for candidate in SeparatorCandidate.allCases where candidate != .comma {
-            let candidateCount = counts[candidate.codeUnit] ?? 0
-            if candidateCount > bestCount {
-                best = candidate.codeUnit
-                bestCount = candidateCount
-            }
-        }
-        return best
     }
 }
