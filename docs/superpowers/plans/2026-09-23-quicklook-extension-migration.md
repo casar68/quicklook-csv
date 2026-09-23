@@ -99,8 +99,12 @@ struct ParsedCSVTable: Equatable {
     let rows: [CSVRow]
     let rowsTruncated: Bool
     let columnsTruncated: Bool
+    var isTabSeparated: Bool = false
+    var fileSizeBytes: Int64 = 0
 }
 ```
+
+`isTabSeparated` (used for the thumbnail badge in Task 9) and `fileSizeBytes` (used for the file-size display and the sandbox-access fix in Task 6/8) have default values, so the synthesized memberwise initializer keeps both parameters optional (Swift default-value-in-memberwise-init behavior) — the Step 2 test above compiles unchanged, and `CSVStreamParser.finish()` in Tasks 2–5 can keep constructing `ParsedCSVTable` without naming them until Task 5/6 need to set them explicitly.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -507,6 +511,17 @@ Append to `CSVStreamParserTests`:
         #expect(table.columnKeys.count == 3)
     }
 
+    @Test func separatorDetectionIgnoresDelimitersInsideQuotedFields() throws {
+        // The real separator is tab (2 occurrences outside quotes). A
+        // quote-unaware count would see 8 commas (4 per row, all inside a
+        // quoted field) beat 2 tabs and wrongly pick comma.
+        let table = try parseAll("\"a,b,c,d,e\"\tf\n\"1,2,3,4,5\"\t6\n")
+        #expect(table.rows.count == 2)
+        #expect(table.rows[0].value(forColumnKey: "col_0") == "a,b,c,d,e")
+        #expect(table.rows[0].value(forColumnKey: "col_1") == "f")
+        #expect(table.rows[1].value(forColumnKey: "col_1") == "6")
+    }
+
     @Test func columnsBeyondMaxColumnsAreDroppedButRowParsingContinues() throws {
         var config = CSVStreamParser.Configuration.preview
         config.maxColumns = 2
@@ -645,6 +660,7 @@ Update `feed(_:)` to buffer the detection prefix before running `process` on any
 
     private func finalizePrefixDetection() {
         separatorUnit = detectSeparator(in: prefixBuffer)
+        isTabSeparated = (separatorUnit == SeparatorCandidate.tab.codeUnit)
         prefixComplete = true
         let buffered = prefixBuffer
         prefixBuffer = []
@@ -654,21 +670,49 @@ Update `feed(_:)` to buffer the detection prefix before running `process` on any
         }
     }
 
+    /// Counts each candidate separator only outside quoted spans. A raw,
+    /// quote-unaware count would let a quoted field's internal punctuation
+    /// (e.g. a long comma-separated sentence quoted in an otherwise
+    /// tab-separated file) outvote the real separator. This uses a plain
+    /// quote-toggle (not the full "" escape handling `process` uses) —
+    /// good enough for a detection heuristic; the real parse in `process`
+    /// is unaffected and stays fully correct.
     private func detectSeparator(in bytes: [UInt8]) -> UInt16 {
+        var counts: [UInt16: Int] = [:]
+        for candidate in SeparatorCandidate.allCases {
+            counts[candidate.codeUnit] = 0
+        }
+
+        var insideQuotesForDetection = false
+        for byte in bytes {
+            let u = UInt16(byte)
+            if u == Unit.quote {
+                insideQuotesForDetection.toggle()
+            } else if !insideQuotesForDetection, counts[u] != nil {
+                counts[u, default: 0] += 1
+            }
+        }
+
         var best = SeparatorCandidate.comma.codeUnit
-        var bestCount = bytes.lazy.filter { UInt16($0) == best }.count
+        var bestCount = counts[best] ?? 0
         for candidate in SeparatorCandidate.allCases where candidate != .comma {
-            let count = bytes.lazy.filter { UInt16($0) == candidate.codeUnit }.count
-            if count > bestCount {
+            let candidateCount = counts[candidate.codeUnit] ?? 0
+            if candidateCount > bestCount {
                 best = candidate.codeUnit
-                bestCount = count
+                bestCount = candidateCount
             }
         }
         return best
     }
 ```
 
-And `finish()` must flush a not-yet-complete prefix buffer (short file) before committing the trailing row:
+Add the `isTabSeparated` property alongside the other detection state:
+
+```swift
+    private var isTabSeparated = false
+```
+
+And `finish()` must flush a not-yet-complete prefix buffer (short file) before committing the trailing row, and include `isTabSeparated` in the returned table:
 
 ```swift
     func finish() throws -> ParsedCSVTable {
@@ -689,7 +733,8 @@ And `finish()` must flush a not-yet-complete prefix buffer (short file) before c
         let keys = (0..<columnCount).map { "col_\($0)" }
         return ParsedCSVTable(
             columnKeys: keys, rows: rows,
-            rowsTruncated: rowsTruncated, columnsTruncated: columnsTruncated
+            rowsTruncated: rowsTruncated, columnsTruncated: columnsTruncated,
+            isTabSeparated: isTabSeparated
         )
     }
 ```
@@ -778,6 +823,23 @@ Append to `CSVStreamParserTests`:
         #expect(table.rows.count == 2)
         #expect(table.rows[1].value(forColumnKey: "col_0") == "é")
     }
+
+    @Test func utf16DecodeFailureDoesNotFallBackToISOLatin1() throws {
+        // The ISO-8859-1 fallback must be confined to the single-byte
+        // stride. Feeding it 2-byte UTF-16 cell bytes would produce
+        // mojibake (every byte reinterpreted as its own Latin-1 character,
+        // including embedded NUL bytes) instead of an empty/best-effort
+        // result.
+        let parser = CSVStreamParser(configuration: .preview)
+        var bytes: [UInt8] = [0xFF, 0xFE]       // UTF-16LE BOM
+        bytes.append(contentsOf: [0x61, 0x00])  // "a"
+        bytes.append(contentsOf: [0x2C, 0x00])  // ","
+        bytes.append(contentsOf: [0x00, 0xDC])  // lone low surrogate U+DC00 — invalid UTF-16 on its own
+        bytes.append(contentsOf: [0x0A, 0x00])  // "\n"
+        _ = try parser.consume(bytes)
+        let table = try parser.finish()
+        #expect(table.rows[0].value(forColumnKey: "col_1").contains("\0") == false)
+    }
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -865,6 +927,7 @@ final class CSVStreamParser {
     private var sawAnyByte = false
     private var finished = false
     private var pendingError: ParseError?
+    private var isTabSeparated = false
 
     init(configuration: Configuration) {
         self.configuration = configuration
@@ -907,7 +970,8 @@ final class CSVStreamParser {
         let keys = (0..<columnCount).map { "col_\($0)" }
         return ParsedCSVTable(
             columnKeys: keys, rows: rows,
-            rowsTruncated: rowsTruncated, columnsTruncated: columnsTruncated
+            rowsTruncated: rowsTruncated, columnsTruncated: columnsTruncated,
+            isTabSeparated: isTabSeparated
         )
     }
 
@@ -987,28 +1051,42 @@ final class CSVStreamParser {
 
     private func finalizePrefixDetection() {
         separatorUnit = detectSeparator(in: prefixBuffer)
+        isTabSeparated = (separatorUnit == SeparatorCandidate.tab.codeUnit)
         prefixComplete = true
         let buffered = prefixBuffer
         prefixBuffer = []
         try? consumeUnits(buffered)
     }
 
+    /// Counts each candidate separator only outside quoted spans (using a
+    /// plain quote-toggle, not the full "" escape handling `process` uses —
+    /// sufficient for this detection heuristic). Without this, a quoted
+    /// field's internal punctuation (e.g. a long comma-separated sentence
+    /// quoted in an otherwise tab-separated file) could outvote the real
+    /// separator.
     private func detectSeparator(in bytes: [UInt8]) -> UInt16 {
-        func count(of codeUnit: UInt16) -> Int {
-            let width = unitWidth()
-            var total = 0
-            var index = 0
-            while index + width <= bytes.count {
-                if unit(at: index, in: bytes) == codeUnit { total += 1 }
-                index += width
+        let width = unitWidth()
+        var counts: [UInt16: Int] = [:]
+        for candidate in SeparatorCandidate.allCases {
+            counts[candidate.codeUnit] = 0
+        }
+
+        var insideQuotesForDetection = false
+        var index = 0
+        while index + width <= bytes.count {
+            let u = unit(at: index, in: bytes)
+            if u == Unit.quote {
+                insideQuotesForDetection.toggle()
+            } else if !insideQuotesForDetection, counts[u] != nil {
+                counts[u, default: 0] += 1
             }
-            return total
+            index += width
         }
 
         var best = SeparatorCandidate.comma.codeUnit
-        var bestCount = count(of: best)
+        var bestCount = counts[best] ?? 0
         for candidate in SeparatorCandidate.allCases where candidate != .comma {
-            let candidateCount = count(of: candidate.codeUnit)
+            let candidateCount = counts[candidate.codeUnit] ?? 0
             if candidateCount > bestCount {
                 best = candidate.codeUnit
                 bestCount = candidateCount
@@ -1071,16 +1149,22 @@ final class CSVStreamParser {
     }
 
     private func decodeCell(_ bytes: [UInt8]) -> String {
-        let primaryEncoding: String.Encoding
         switch stride {
-        case .singleByte: primaryEncoding = .utf8
-        case .utf16LittleEndian: primaryEncoding = .utf16LittleEndian
-        case .utf16BigEndian: primaryEncoding = .utf16BigEndian
+        case .singleByte:
+            // ISO-8859-1 never fails to decode (every byte is a valid code
+            // point), so this fallback only makes sense — and is only
+            // applied — for the 1-byte-per-unit encodings. Falling back to
+            // it for 2-byte UTF-16 bytes would reinterpret each byte as its
+            // own Latin-1 character and produce mojibake.
+            if let decoded = String(bytes: bytes, encoding: .utf8) {
+                return decoded
+            }
+            return String(bytes: bytes, encoding: .isoLatin1) ?? ""
+        case .utf16LittleEndian:
+            return String(bytes: bytes, encoding: .utf16LittleEndian) ?? ""
+        case .utf16BigEndian:
+            return String(bytes: bytes, encoding: .utf16BigEndian) ?? ""
         }
-        if let decoded = String(bytes: bytes, encoding: primaryEncoding) {
-            return decoded
-        }
-        return String(bytes: bytes, encoding: .isoLatin1) ?? ""
     }
 
     private func commitRow() {
@@ -1245,8 +1329,18 @@ Add to `Shared/CSVStreamParser.swift`:
 ```swift
 extension CSVStreamParser {
     static func parse(fileAt url: URL, configuration: Configuration) throws -> ParsedCSVTable {
+        // The security-scoped access window must cover every access to
+        // this URL, not just the read loop below — including the file-size
+        // lookup. Fetching the size separately, after this function
+        // returns (and `defer` has already called
+        // stopAccessingSecurityScopedResource()), would silently read 0 or
+        // fail. That's why `ParsedCSVTable.fileSizeBytes` is populated
+        // here rather than by a second, independent call in the view
+        // controller.
         let didAccess = url.startAccessingSecurityScopedResource()
         defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+
+        let fileSize = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
 
         guard let handle = try? FileHandle(forReadingFrom: url) else {
             throw ParseError.unreadableFile
@@ -1260,7 +1354,9 @@ extension CSVStreamParser {
             let shouldStop = try parser.consume(Array(chunkData))
             if shouldStop { break }
         }
-        return try parser.finish()
+        var table = try parser.finish()
+        table.fileSizeBytes = fileSize
+        return table
     }
 }
 ```
@@ -1406,18 +1502,22 @@ final class CSVPreviewViewController: NSViewController, QLPreviewingController {
 
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
         do {
+            // File size comes from `table.fileSizeBytes`, populated by
+            // CSVStreamParser.parse(fileAt:) itself — it is the only place
+            // that holds an active security-scoped access grant on `url`.
+            // A second, independent file-attributes lookup here would run
+            // after that access has already been released and would
+            // silently fail or read stale/zero data.
             let table = try CSVStreamParser.parse(fileAt: url, configuration: .preview)
-            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-            let fileSize = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
-            showTable(table, fileSize: fileSize)
+            showTable(table)
             handler(nil)
         } catch {
             handler(error)
         }
     }
 
-    private func showTable(_ table: ParsedCSVTable, fileSize: Int64) {
-        let hosting = NSHostingController(rootView: CSVPreviewView(table: table, fileSize: fileSize))
+    private func showTable(_ table: ParsedCSVTable) {
+        let hosting = NSHostingController(rootView: CSVPreviewView(table: table))
         hostingController = hosting
 
         addChild(hosting)
@@ -1442,7 +1542,6 @@ private struct ColumnKey: Identifiable {
 
 struct CSVPreviewView: View {
     let table: ParsedCSVTable
-    let fileSize: Int64
 
     private var displayedColumns: [ColumnKey] {
         table.columnKeys.map(ColumnKey.init)
@@ -1454,7 +1553,13 @@ struct CSVPreviewView: View {
             Table(table.rows) {
                 TableColumnForEach(displayedColumns) { column in
                     TableColumn(column.key) { row in
+                        // A single very long field must not wrap to
+                        // multiple lines: that would blow out this row's
+                        // height in a native Table and badly degrade
+                        // scroll performance across the whole table.
                         Text(row.value(forColumnKey: column.key))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
             }
@@ -1465,7 +1570,7 @@ struct CSVPreviewView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text("\(table.columnKeys.count) column(s), \(table.rows.count) row(s)")
-                Text(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))
+                Text(ByteCountFormatter.string(fromByteCount: table.fileSizeBytes, countStyle: .file))
                     .foregroundStyle(.secondary)
             }
             if table.rowsTruncated {
@@ -1537,14 +1642,18 @@ Use `GetTargetBuildSettings` on `QuickLookCSVThumbnail` to confirm the generated
 
 - [ ] **Step 5: Implement the thumbnail provider**
 
-Create `QuickLookCSVThumbnail/CSVThumbnailProvider.swift` — this ports the drawing logic from the legacy `GenerateThumbnailForURL.m` (grid, alternating row background, "csv"/"tab" badge) to consume `ParsedCSVTable` and draw into the context `QLThumbnailReply` provides directly (no manual bitmap context creation/teardown needed, unlike the legacy code):
+Create `QuickLookCSVThumbnail/CSVThumbnailProvider.swift` — this ports the drawing logic from the legacy `GenerateThumbnailForURL.m` (grid, alternating row background, aspect-ratio-adjusted final size, "csv"/"tab" badge) to consume `ParsedCSVTable`.
+
+`QLThumbnailReply.init(contextSize:currentContextDrawing:)` — confirmed via the QuickLookThumbnailing documentation as `convenience init(contextSize: CGSize, currentContextDrawing drawingBlock: @escaping () -> Bool)` — takes a **no-argument** closure and expects it to draw into `NSGraphicsContext.current`, which the framework sets up for you; there is no `CGContext` parameter to capture, and no manual bitmap context creation/teardown as the legacy code needed.
+
+Unlike the legacy code, `contextSize` must be known *before* the drawing block runs (it's a constructor argument, not something decided mid-draw), so measuring the aspect-adjusted final size — legacy did this by drawing into an oversized square canvas and cropping afterward — has to happen as a separate pass here, using the same text measurements the draw pass will use, before constructing the reply:
 
 ```swift
 import QuickLookThumbnailing
 import AppKit
 
 final class CSVThumbnailProvider: QLThumbnailProvider {
-    private let aspect: CGFloat = 0.8
+    private static let aspect: CGFloat = 0.8
 
     override func provideThumbnail(for request: QLFileThumbnailRequest, _ handler: @escaping (QLThumbnailReply?, Error?) -> Void) {
         do {
@@ -1553,60 +1662,123 @@ final class CSVThumbnailProvider: QLThumbnailProvider {
                 handler(nil, nil)
                 return
             }
-            let reply = QLThumbnailReply(contextSize: request.maximumSize) { [weak self] in
-                self?.draw(table: table, in: request.maximumSize, isTabSeparated: false) ?? false
-            }
+
+            let layout = Self.measureLayout(for: table, maxSize: request.maximumSize)
+            let reply = QLThumbnailReply(contextSize: layout.size, currentContextDrawing: {
+                Self.draw(table: table, layout: layout)
+            })
             handler(reply, nil)
         } catch {
             handler(nil, error)
         }
     }
 
-    private func draw(table: ParsedCSVTable, in maxSize: CGSize, isTabSeparated: Bool) -> Bool {
-        guard let context = NSGraphicsContext.current?.cgContext else { return false }
+    private struct Layout {
+        let size: CGSize
+        let rowHeight: CGFloat
+        let font: NSFont
+        let columnWidths: [CGFloat]
+        let badgeMaxSize: CGFloat
+    }
 
+    private static func measureLayout(for table: ParsedCSVTable, maxSize: CGSize) -> Layout {
         let rowCount = max(4, min(table.rows.count, 18))
         let rowHeight = ceil(maxSize.height / CGFloat(rowCount))
         let fontSize = round(0.666 * rowHeight)
         let font = NSFont.systemFont(ofSize: fontSize)
-        let textColor = NSColor(calibratedWhite: 0.25, alpha: 1)
-        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: textColor]
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let textPadding: CGFloat = 5
 
+        var columnWidths: [CGFloat] = []
+        var totalWidth: CGFloat = 0
+        for key in table.columnKeys {
+            if totalWidth > maxSize.width { break }
+            var maxCellWidth: CGFloat = 0
+            for row in table.rows {
+                let text = row.value(forColumnKey: key) as NSString
+                maxCellWidth = max(maxCellWidth, text.size(withAttributes: attributes).width)
+            }
+            let columnWidth = maxCellWidth + 2 * textPadding
+            columnWidths.append(columnWidth)
+            totalWidth += columnWidth
+        }
+
+        var usedWidth = totalWidth
+        var usedHeight = CGFloat(table.rows.count) * rowHeight
+        let badgeMaxSize: CGFloat
+
+        if (usedWidth > maxSize.width && usedHeight > maxSize.height) || usedWidth <= usedHeight {
+            badgeMaxSize = usedHeight
+            usedWidth = usedHeight * aspect
+        } else {
+            badgeMaxSize = usedWidth
+            usedHeight = usedWidth * aspect
+        }
+
+        return Layout(
+            size: CGSize(width: ceil(usedWidth), height: ceil(usedHeight)),
+            rowHeight: rowHeight, font: font, columnWidths: columnWidths, badgeMaxSize: badgeMaxSize
+        )
+    }
+
+    @discardableResult
+    private static func draw(table: ParsedCSVTable, layout: Layout) -> Bool {
+        let textPadding: CGFloat = 5
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: layout.font,
+            .foregroundColor: NSColor(calibratedWhite: 0.25, alpha: 1)
+        ]
         let rowBG = NSColor.white
         let altRowBG = NSColor(calibratedWhite: 0.9, alpha: 1)
         let borderColor = NSColor(calibratedWhite: 0.67, alpha: 1)
 
         var cellX: CGFloat = 0
-        var usedHeight: CGFloat = 0
-        let textPadding: CGFloat = 5
-
         for (columnIndex, key) in table.columnKeys.enumerated() {
-            if cellX > maxSize.width { break }
-            var maxCellWidth: CGFloat = 0
-            var rowY: CGFloat = 0
+            guard columnIndex < layout.columnWidths.count else { break }
+            let columnWidth = layout.columnWidths[columnIndex]
 
             for (rowIndex, row) in table.rows.enumerated() {
-                let rowRect = CGRect(x: cellX, y: rowY, width: maxSize.width - cellX, height: rowHeight)
+                // NSGraphicsContext.current here uses AppKit's unflipped,
+                // bottom-left-origin coordinate system, so row 0 (drawn
+                // first, expected at the top) must be placed at the
+                // highest Y, not Y=0.
+                let topY = CGFloat(rowIndex) * layout.rowHeight
+                let y = layout.size.height - topY - layout.rowHeight
+                let rowRect = CGRect(x: cellX, y: y, width: columnWidth, height: layout.rowHeight)
+
                 if columnIndex == 0 {
                     (rowIndex % 2 == 0 ? rowBG : altRowBG).setFill()
-                    context.fill(rowRect)
+                    rowRect.fill()
                 } else {
-                    context.setStrokeColor(borderColor.cgColor)
-                    context.move(to: CGPoint(x: cellX, y: rowRect.minY))
-                    context.addLine(to: CGPoint(x: cellX, y: rowRect.maxY))
-                    context.strokePath()
+                    borderColor.setStroke()
+                    let path = NSBezierPath()
+                    path.move(to: CGPoint(x: cellX, y: rowRect.minY))
+                    path.line(to: CGPoint(x: cellX, y: rowRect.maxY))
+                    path.stroke()
                 }
 
                 let text = row.value(forColumnKey: key) as NSString
-                let textRect = CGRect(x: cellX + textPadding, y: rowY, width: rowRect.width - 2 * textPadding, height: rowHeight)
-                let size = text.size(withAttributes: attributes)
+                let textRect = CGRect(x: cellX + textPadding, y: y, width: columnWidth - 2 * textPadding, height: layout.rowHeight)
                 text.draw(in: textRect, withAttributes: attributes)
-                maxCellWidth = max(maxCellWidth, size.width)
-                rowY += rowHeight
-                usedHeight = max(usedHeight, rowY)
             }
-            cellX += maxCellWidth + 2 * textPadding
+            cellX += columnWidth
         }
+
+        let badgeString = (table.isTabSeparated ? "tab" : "csv") as NSString
+        let badgeFontSize = ceil(layout.badgeMaxSize * 0.28)
+        let badgeShadow = NSShadow()
+        badgeShadow.shadowOffset = NSSize(width: 0, height: 0)
+        badgeShadow.shadowBlurRadius = badgeFontSize * 0.01
+        badgeShadow.shadowColor = NSColor.white
+        let badgeAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.boldSystemFont(ofSize: badgeFontSize),
+            .foregroundColor: NSColor(calibratedRed: 0.05, green: 0.25, blue: 0.1, alpha: 1),
+            .shadow: badgeShadow
+        ]
+        let badgeSize = badgeString.size(withAttributes: badgeAttributes)
+        let badgeX = (layout.size.width / 2) - (badgeSize.width / 2)
+        let badgeY = 0.025 * layout.badgeMaxSize
+        badgeString.draw(at: CGPoint(x: badgeX, y: badgeY), withAttributes: badgeAttributes)
 
         return true
     }
@@ -1615,7 +1787,7 @@ final class CSVThumbnailProvider: QLThumbnailProvider {
 
 - [ ] **Step 6: Build**
 
-Run `BuildProject`. Expected: build succeeds. `QLThumbnailReply`'s exact drawing-block signature and `NSGraphicsContext.current?.cgContext` availability should be verified against the framework headers if the compiler reports a mismatch — adjust the closure signature to match (it may require returning `Bool` synchronously without `[weak self]` capture if `QLThumbnailProvider` isn't a class the block can safely weak-capture across; if so, capture `table` by value instead and drop `self`).
+Run `BuildProject`. Expected: build succeeds. `QLFileThumbnailRequest.fileURL`/`.maximumSize` should be verified against the framework headers if the compiler reports a mismatch.
 
 - [ ] **Step 7: Commit**
 
