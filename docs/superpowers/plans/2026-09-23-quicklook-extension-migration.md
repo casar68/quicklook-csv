@@ -192,8 +192,8 @@ struct CSVStreamParserTests {
         _ = try parser.consume(Array(bytes[0..<3]))
         _ = try parser.consume(Array(bytes[3...]))
         let table = try parser.finish()
-        #expect(table.rows.count == 1)
-        #expect(table.rows[0].value(forColumnKey: "col_1") == "2")
+        #expect(table.rows.count == 2)
+        #expect(table.rows[1].value(forColumnKey: "col_1") == "2")
     }
 }
 ```
