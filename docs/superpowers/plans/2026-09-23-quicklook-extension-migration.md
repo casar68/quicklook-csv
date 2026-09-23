@@ -1256,32 +1256,35 @@ struct CSVDocumentTests {
         let doc = CSVDocument()
         doc.autoDetectSeparator = false
         doc.separator = ","
-        _ = doc.numRowsFromCSVString("\"say \"\"hi\"\"\"\n", maxRows: 0, error: nil)
-        #expect(doc.rows.first?.column(forKey: "col_0") == "say \"hi\"")
+        _ = doc.numRows(fromCSVString: "\"say \"\"hi\"\"\"\n", maxRows: 0, error: nil)
+        #expect((doc.rows.first as? CSVRowObject)?.column(forKey: "col_0") == "say \"hi\"")
     }
 
     @Test func autoDetectsSemicolonSeparator() {
         let doc = CSVDocument()
         doc.autoDetectSeparator = true
-        _ = doc.numRowsFromCSVString("a;b;c\n1;2;3\n", maxRows: 0, error: nil)
+        _ = doc.numRows(fromCSVString: "a;b;c\n1;2;3\n", maxRows: 0, error: nil)
         #expect(doc.separator == ";")
-        #expect(doc.rows.first?.column(forKey: "col_1") == "2")
+        // CSVDocument treats every scanned line as a data row (col_0, col_1, ...);
+        // it never singles out row 0 as a header. So rows[0] is "a","b","c" and
+        // rows[1] is the "1","2","3" data row.
+        #expect((doc.rows[1] as? CSVRowObject)?.column(forKey: "col_1") == "2")
     }
 
     @Test func maxRowsCapKeepsExactlyMaxRowsRows() {
         let doc = CSVDocument()
         doc.autoDetectSeparator = false
         doc.separator = ","
-        let count = doc.numRowsFromCSVString("1\n2\n3\n4\n", maxRows: 2, error: nil)
+        let count = doc.numRows(fromCSVString: "1\n2\n3\n4\n", maxRows: 2, error: nil)
         #expect(count > 2) // numRows reflects rows scanned, not rows kept
         #expect(doc.rows.count == 2)
-        #expect(doc.rows[0].column(forKey: "col_0") == "1")
-        #expect(doc.rows[1].column(forKey: "col_0") == "2")
+        #expect((doc.rows[0] as? CSVRowObject)?.column(forKey: "col_0") == "1")
+        #expect((doc.rows[1] as? CSVRowObject)?.column(forKey: "col_0") == "2")
     }
 }
 ```
 
-(Adjust `column(forKey:)` to the exact bridged Swift name Xcode generates for `CSVRowObject`'s `- (NSString *)columnForKey:` — the same name used in Step 4's conformance test below; determine it once here and reuse it there.)
+`CSVDocument.h` declares `rows` as a plain untyped `NSArray *` (no Objective-C lightweight generics), so Swift imports it as `[Any]`, not `[CSVRowObject]` — the `as? CSVRowObject` casts above are required, not optional style. Also note the actual bridged Swift name for `- (NSString *)columnForKey:` and for `- (NSUInteger)numRowsFromCSVString:maxRows:error:` — Xcode's ObjC-to-Swift import renamed the latter to `numRows(fromCSVString:maxRows:error:)` (the first parameter's leading noun becomes part of the base name). Use `column(forKey:)` (matching the `- (NSString *)columnForKey:` selector) consistently — the same name used in Step 4's conformance test below.
 
 Run these 3 tests. Expected: all PASS immediately (this is characterization of already-correct, already-fixed legacy behavior, not new implementation) — if `maxRowsCapKeepsExactlyMaxRowsRows` fails with `doc.rows.count == 3`, the earlier off-by-one fix to `CSVDocument.m` has regressed; stop and investigate before continuing.
 
@@ -1312,11 +1315,12 @@ struct CSVStreamParserConformanceTests {
         let legacyDoc = CSVDocument()
         legacyDoc.autoDetectSeparator = true
         let fileString = try String(contentsOf: url, encoding: .utf8)
-        _ = legacyDoc.numRowsFromCSVString(fileString, maxRows: 500, error: nil)
+        _ = legacyDoc.numRows(fromCSVString: fileString, maxRows: 500, error: nil)
 
         #expect(newTable.columnKeys.count == legacyDoc.columnKeys.count)
         #expect(newTable.rows.count == legacyDoc.rows.count)
-        for (index, legacyRow) in legacyDoc.rows.enumerated() {
+        for (index, legacyRowAny) in legacyDoc.rows.enumerated() {
+            let legacyRow = legacyRowAny as! CSVRowObject
             for key in newTable.columnKeys {
                 #expect(newTable.rows[index].value(forColumnKey: key) == (legacyRow.column(forKey: key) ?? ""))
             }
@@ -1327,7 +1331,7 @@ struct CSVStreamParserConformanceTests {
 private final class BundleMarker {}
 ```
 
-(Use the same bridged `column(forKey:)` name determined in Step 3.)
+(Use the same bridged `column(forKey:)`/`numRows(fromCSVString:maxRows:error:)` names determined in Step 3 — `legacyDoc.rows` is `[Any]`, so each element needs the `as! CSVRowObject` cast shown above.)
 
 - [ ] **Step 5: Run tests to verify the new test fails**
 
