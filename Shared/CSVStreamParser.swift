@@ -353,3 +353,36 @@ final class CSVStreamParser {
         cellsSeenInCurrentRow = 0
     }
 }
+
+extension CSVStreamParser {
+    static func parse(fileAt url: URL, configuration: Configuration) throws -> ParsedCSVTable {
+        // The security-scoped access window must cover every access to
+        // this URL, not just the read loop below — including the file-size
+        // lookup. Fetching the size separately, after this function
+        // returns (and `defer` has already called
+        // stopAccessingSecurityScopedResource()), would silently read 0 or
+        // fail. That's why `ParsedCSVTable.fileSizeBytes` is populated
+        // here rather than by a second, independent call in the view
+        // controller.
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+
+        let fileSize = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            throw ParseError.unreadableFile
+        }
+        defer { try? handle.close() }
+
+        let parser = CSVStreamParser(configuration: configuration)
+        while true {
+            let chunkData = handle.readData(ofLength: configuration.chunkByteSize)
+            if chunkData.isEmpty { break }
+            let shouldStop = try parser.consume(Array(chunkData))
+            if shouldStop { break }
+        }
+        var table = try parser.finish()
+        table.fileSizeBytes = fileSize
+        return table
+    }
+}
