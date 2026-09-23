@@ -28,6 +28,7 @@ final class CSVStreamParser {
         static let comma: UInt16 = 0x2C
         static let lf: UInt16 = 0x0A
         static let cr: UInt16 = 0x0D
+        static let quote: UInt16 = 0x22
     }
 
     private let configuration: Configuration
@@ -43,6 +44,8 @@ final class CSVStreamParser {
     private var sawAnyByte = false
     private var finished = false
     private var pendingError: ParseError?
+    private var insideQuotes = false
+    private var pendingCloseQuote = false
 
     init(configuration: Configuration) {
         self.configuration = configuration
@@ -85,13 +88,32 @@ final class CSVStreamParser {
     }
 
     private func process(unit: UInt16) {
-        if unit == Unit.comma {
+        if pendingCloseQuote {
+            pendingCloseQuote = false
+            if unit == Unit.quote {
+                appendToCell(unit: unit)
+                insideQuotes = true
+                return
+            }
+            // Field really closed; insideQuotes is already false. Fall
+            // through to process this unit normally below.
+        }
+
+        if unit == Unit.quote {
+            justSawCR = false
+            if insideQuotes {
+                pendingCloseQuote = true
+                insideQuotes = false
+            } else {
+                insideQuotes = true
+            }
+        } else if unit == Unit.comma && !insideQuotes {
             justSawCR = false
             finalizeCurrentCell()
-        } else if unit == Unit.cr {
+        } else if unit == Unit.cr && !insideQuotes {
             justSawCR = true
             commitRow()
-        } else if unit == Unit.lf {
+        } else if unit == Unit.lf && !insideQuotes {
             if justSawCR {
                 justSawCR = false
             } else {

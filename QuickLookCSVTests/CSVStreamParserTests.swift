@@ -57,4 +57,28 @@ struct CSVStreamParserTests {
         #expect(table.rows.count == 2)
         #expect(table.rows[1].value(forColumnKey: "col_1") == "2")
     }
+
+    @Test func quotedFieldMayContainCommaLiterally() throws {
+        let table = try parseAll("\"a,b\",c\n")
+        #expect(table.rows[0].value(forColumnKey: "col_0") == "a,b")
+        #expect(table.rows[0].value(forColumnKey: "col_1") == "c")
+    }
+
+    @Test func quotedFieldMayContainEmbeddedNewline() throws {
+        let table = try parseAll("\"a\nb\",c\n")
+        #expect(table.rows.count == 1)
+        #expect(table.rows[0].value(forColumnKey: "col_0") == "a\nb")
+        #expect(table.rows[0].value(forColumnKey: "col_1") == "c")
+    }
+
+    @Test func doubledQuoteInsideQuotedFieldIsALiteralQuote() throws {
+        let table = try parseAll("\"say \"\"hi\"\"\"\n")
+        #expect(table.rows[0].value(forColumnKey: "col_0") == "say \"hi\"")
+    }
+
+    @Test func crlfLineEndingIsTreatedAsOneRowTerminator() throws {
+        let table = try parseAll("a,b\r\n1,2\r\n")
+        #expect(table.rows.count == 2)
+        #expect(table.rows[1].value(forColumnKey: "col_1") == "2")
+    }
 }
