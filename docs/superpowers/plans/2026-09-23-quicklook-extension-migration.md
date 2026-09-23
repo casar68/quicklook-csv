@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Deployment target for all three new targets: macOS 13.0.
+- Deployment target for `QuickLookCSVApp` and `QuickLookCSVThumbnail`: macOS 13.0. `QuickLookCSVPreview` is macOS 14.4 (raised from the originally-planned 13.0 during Task 8: `TableColumnForEach` — the only way to build a `Table` with a dynamic/unbounded number of columns, required since `maxColumns` allows up to 50 — is unavailable before 14.4, confirmed by the compiler's own diagnostic: `error: 'TableColumnForEach' is only available in macOS 14.4 or newer`. `Table`'s closure-based column builder otherwise tops out at 10 statically-declared columns, which can't represent a CSV's variable column count. User-approved deviation, scoped to this one target only.).
 - New code (host app, both extensions) is Swift. `CSVDocument.h/.m` and `CSVRowObject.h/.m` are never modified and never added to the new targets — they stay exclusive to the legacy `QuickLookCSV` target.
 - The legacy `QuickLookCSV` target is not modified in this plan (no files, no build settings).
 - `CSVStreamParser` and `ParsedCSVTable`/`CSVRow` are new Swift files, added as members of `QuickLookCSVPreview` and `QuickLookCSVThumbnail` only.
@@ -1482,7 +1482,7 @@ options: { "languageChoice": "Swift", "isUIExtension": "true" }
 
 - [ ] **Step 2: Set the deployment target**
 
-`UpdateTargetBuildSetting` on `QuickLookCSVPreview`: `MACOSX_DEPLOYMENT_TARGET` = `13.0`.
+`UpdateTargetBuildSetting` on `QuickLookCSVPreview`: `MACOSX_DEPLOYMENT_TARGET` = `14.4` (not `13.0` — see the Global Constraints note on why this one target needs a higher minimum than the rest of the plan: `TableColumnForEach`, used in Step 6 below to render a dynamic number of columns, requires macOS 14.4+).
 
 - [ ] **Step 3: Add the shared parser files to this target**
 
