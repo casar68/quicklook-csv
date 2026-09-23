@@ -2,6 +2,20 @@
 <Workspace
    version = "1.0">
    <FileRef
-      location = "self:QuickLookCSV.xcodeproj">
+      location = "self:">
    </FileRef>
+   <Group
+      location = "group:Shared"
+      name = "Shared">
+      <FileRef
+         location = "group:ParsedCSVTable.swift">
+      </FileRef>
+   </Group>
+   <Group
+      location = "group:QuickLookCSVTests"
+      name = "QuickLookCSVTests">
+      <FileRef
+         location = "group:ParsedCSVTable.swift">
+      </FileRef>
+   </Group>
 </Workspace>
