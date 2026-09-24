@@ -12,8 +12,8 @@
 		8D576312048677EA00EA77CD /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = 08FB77B6FE84183AC02AAC07 /* main.c */; settings = {ATTRIBUTES = (); }; };
 		8D576314048677EA00EA77CD /* CoreFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0AA1909FFE8422F4C02AAC07 /* CoreFoundation.framework */; };
 		8D5B49A804867FD3000E48DA /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 8D5B49A704867FD3000E48DA /* InfoPlist.strings */; };
-		BE04604E30641DA100B238FA /* QuickLookCSVPreview.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = BE04604730641DA100B238FA /* QuickLookCSVPreview.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		BE046067306423A200B238FA /* QuickLookCSVThumbnail.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = BE046060306423A200B238FA /* QuickLookCSVThumbnail.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		BE04604E30641DA100B238FA /* QuickLookCSVPreview.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BE04604730641DA100B238FA /* QuickLookCSVPreview.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		BE046067306423A200B238FA /* QuickLookCSVThumbnail.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BE046060306423A200B238FA /* QuickLookCSVThumbnail.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C86B05270671AA6E00DD9006 /* CoreServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C86B05260671AA6E00DD9006 /* CoreServices.framework */; };
 		EE77BE9C0FFEB3EA008B09DE /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = EE77BE9B0FFEB3EA008B09DE /* Localizable.strings */; };
 		EEB3ED1C0FFE217E00B7462F /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EEB3ED1B0FFE217E00B7462F /* Cocoa.framework */; };
@@ -44,16 +44,16 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		BE04605330641DA100B238FA /* Embed ExtensionKit Extensions */ = {
+		BE04605330641DA100B238FA /* Embed App Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = "$(EXTENSIONS_FOLDER_PATH)";
-			dstSubfolderSpec = 16;
+			dstPath = "";
+			dstSubfolderSpec = 13;
 			files = (
-				BE04604E30641DA100B238FA /* QuickLookCSVPreview.appex in Embed ExtensionKit Extensions */,
-				BE046067306423A200B238FA /* QuickLookCSVThumbnail.appex in Embed ExtensionKit Extensions */,
+				BE04604E30641DA100B238FA /* QuickLookCSVPreview.appex in Embed App Extensions */,
+				BE046067306423A200B238FA /* QuickLookCSVThumbnail.appex in Embed App Extensions */,
 			);
-			name = "Embed ExtensionKit Extensions";
+			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXCopyFilesBuildPhase section */
@@ -70,8 +70,8 @@
 		BE04600D3063D3EE00B238FA /* fr */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = fr; path = fr.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		BE046012306406A200B238FA /* QuickLookCSVTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = QuickLookCSVTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BE04603830641C4600B238FA /* QuickLookCSVApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = QuickLookCSVApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		BE04604730641DA100B238FA /* QuickLookCSVPreview.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.extensionkit-extension"; includeInIndex = 0; path = QuickLookCSVPreview.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		BE046060306423A200B238FA /* QuickLookCSVThumbnail.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.extensionkit-extension"; includeInIndex = 0; path = QuickLookCSVThumbnail.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		BE04604730641DA100B238FA /* QuickLookCSVPreview.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = QuickLookCSVPreview.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		BE046060306423A200B238FA /* QuickLookCSVThumbnail.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = QuickLookCSVThumbnail.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		C86B05260671AA6E00DD9006 /* CoreServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreServices.framework; path = /System/Library/Frameworks/CoreServices.framework; sourceTree = "<absolute>"; };
 		EE77BE4B0FFEB207008B09DE /* English */ = {isa = PBXFileReference; fileEncoding = 10; lastKnownFileType = text.plist.strings; name = English; path = English.lproj/Localizable.strings; sourceTree = "<group>"; };
 		EE77BE9D0FFEB3F1008B09DE /* German */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = German; path = German.lproj/Localizable.strings; sourceTree = "<group>"; };
@@ -293,7 +293,7 @@
 				BE04603430641C4600B238FA /* Sources */,
 				BE04603530641C4600B238FA /* Frameworks */,
 				BE04603630641C4600B238FA /* Resources */,
-				BE04605330641DA100B238FA /* Embed ExtensionKit Extensions */,
+				BE04605330641DA100B238FA /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
@@ -331,7 +331,7 @@
 			);
 			productName = QuickLookCSVPreview;
 			productReference = BE04604730641DA100B238FA /* QuickLookCSVPreview.appex */;
-			productType = "com.apple.product-type.extensionkit-extension";
+			productType = "com.apple.product-type.app-extension";
 		};
 		BE04605F306423A200B238FA /* QuickLookCSVThumbnail */ = {
 			isa = PBXNativeTarget;
@@ -353,7 +353,7 @@
 			);
 			productName = QuickLookCSVThumbnail;
 			productReference = BE046060306423A200B238FA /* QuickLookCSVThumbnail.appex */;
-			productType = "com.apple.product-type.extensionkit-extension";
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
