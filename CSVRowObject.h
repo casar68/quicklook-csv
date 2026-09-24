@@ -17,7 +17,7 @@
 
 @property (copy, nonatomic) NSDictionary *columns;
 
-+ (CSVRowObject *)newWithDictionary:(NSMutableDictionary *)dict;
++ (CSVRowObject *)rowWithDictionary:(NSMutableDictionary *)dict;
 
 - (NSString *)columns:(NSArray *)columnKeys combinedByString:(NSString *)sepString;
 - (NSString *)columnForKey:(NSString *)columnKey;

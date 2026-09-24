@@ -2,6 +2,34 @@
 <Workspace
    version = "1.0">
    <FileRef
-      location = "self:QuickLookCSV.xcodeproj">
+      location = "self:">
    </FileRef>
+   <Group
+      location = "group:Shared"
+      name = "Shared">
+      <FileRef
+         location = "group:ParsedCSVTable.swift">
+      </FileRef>
+   </Group>
+   <Group
+      location = "group:QuickLookCSVTests"
+      name = "QuickLookCSVTests">
+      <FileRef
+         location = "group:CSVStreamParserTests.swift">
+      </FileRef>
+   </Group>
+   <Group
+      location = "group:QuickLookCSVApp"
+      name = "QuickLookCSVApp">
+   </Group>
+   <Group
+      location = "group:QuickLookCSVPreview"
+      name = "QuickLookCSVPreview">
+      <FileRef
+         location = "group:CSVPreviewViewController.swift">
+      </FileRef>
+      <FileRef
+         location = "group:CSVPreviewView.swift">
+      </FileRef>
+   </Group>
 </Workspace>

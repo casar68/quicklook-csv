@@ -11,14 +11,21 @@
 #include <CoreServices/CoreServices.h>
 #include <QuickLook/QuickLook.h>
 #import <Cocoa/Cocoa.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "CSVDocument.h"
 #import "CSVRowObject.h"
 
 #define MAX_ROWS 500
 
+// DEPRECATED: QLPreviewRequestIsCancelled / QLPreviewRequestSetDataRepresentation (and the whole
+// .qlgenerator CFPlugIn model wired up in main.c) were deprecated in macOS 12 in favor of
+// QLPreviewingController hosted in a Preview Extension. Left in place for now; migrating to a
+// Preview Extension is planned as a separate, upcoming project.
+
 static char* htmlReadableFileEncoding(NSStringEncoding stringEncoding);
 static char* humanReadableFileEncoding(NSStringEncoding stringEncoding);
-static char* formatFilesize(float bytes);
+static NSString* formatFilesize(float bytes);
+static NSString* htmlEscape(NSString *string);
 
 
 /**
@@ -93,7 +100,7 @@ OSStatus GeneratePreviewForURL(void *thisInterface, QLPreviewRequestRef preview,
 				 numRows,
 				 (1 == numRowsParsed) ? NSLocalizedString(@"row", nil) : NSLocalizedString(@"rows", nil)
 				 ];
-				[html appendFormat:@"<div class=\"file_info\"><b>%s</b>, %@-%@, %s</div><table>",
+				[html appendFormat:@"<div class=\"file_info\"><b>%@</b>, %@-%@, %s</div><table>",
 				 formatFilesize([fileAttributes[NSFileSize] floatValue]),
 				 NSLocalizedString(separatorDesc, nil),
 				 NSLocalizedString(@"Separated", nil),
@@ -101,10 +108,18 @@ OSStatus GeneratePreviewForURL(void *thisInterface, QLPreviewRequestRef preview,
 				 ];
 				
 				// add the table rows
+				// Cell content comes straight from the user-supplied file, so every value must be
+				// HTML-escaped before being embedded - otherwise a crafted CSV/TSV cell can inject
+				// markup or script into the QuickLook preview.
 				BOOL altRow = NO;
 				for (CSVRowObject *row in csvDoc.rows) {
 					[html appendFormat:@"<tr%@><td>", altRow ? @" class=\"alt_row\"" : @""];
-					[html appendString:[row columns:csvDoc.columnKeys combinedByString:@"</td><td>"]];
+					
+					NSMutableArray *escapedCells = [NSMutableArray arrayWithCapacity:[csvDoc.columnKeys count]];
+					for (NSString *colKey in csvDoc.columnKeys) {
+						[escapedCells addObject:htmlEscape([row columnForKey:colKey])];
+					}
+					[html appendString:[escapedCells componentsJoinedByString:@"</td><td>"]];
 					[html appendString:@"</td></tr>\n"];
 					
 					altRow = !altRow;
@@ -123,7 +138,7 @@ OSStatus GeneratePreviewForURL(void *thisInterface, QLPreviewRequestRef preview,
 				CFDictionaryRef properties = (__bridge CFDictionaryRef)@{};
 				QLPreviewRequestSetDataRepresentation(preview,
 													  (__bridge CFDataRef)[html dataUsingEncoding:stringEncoding],
-													  kUTTypeHTML,
+													  (__bridge CFStringRef)UTTypeHTML.identifier,
 													  properties
 													  );
 			}
@@ -207,25 +222,46 @@ static char* humanReadableFileEncoding(NSStringEncoding stringEncoding)
 }
 
 
-static char* formatFilesize(float bytes) {
+/**
+ *  Formats a byte count into a human-readable string, e.g. "4.20 MB".
+ *
+ *  Returns an autoreleased NSString rather than a fixed-size C buffer: the previous
+ *  implementation used a `static char[9]` which was one byte too small for the longest
+ *  possible output ("999.99 GB" + NUL needs 10 bytes) and, being `static`, was also unsafe
+ *  to share across the concurrent preview requests this generator declares support for.
+ */
+static NSString* formatFilesize(float bytes) {
 	if (bytes < 1) {
-		return "";
+		return @"";
 	}
 	
-	char *format[] = { "%.0f", "%.0f", "%.2f", "%.2f", "%.2f", "%.2f" };
-	char *unit[] = { "Byte", "KB", "MB", "GB", "TB", "PB" };
+	NSString *format[] = { @"%.0f", @"%.0f", @"%.2f", @"%.2f", @"%.2f", @"%.2f" };
+	NSString *unit[] = { @"Byte", @"KB", @"MB", @"GB", @"TB", @"PB" };
 	int i = 0;
 	while (bytes > 1000) {
-		bytes /= 1000;				// Since OS X 10.7 (or 10.6?) Apple uses "kilobyte" and no longer "Kilobyte" or "kibibyte"
+		bytes /= 1000;			// Since OS X 10.7 (or 10.6?) Apple uses "kilobyte" and no longer "Kilobyte" or "kibibyte"
 		i++;
 	}
 	
-	char formatString[10];
-	static char result[9];			// longest string can be "999 Byte" or "999.99 GB"
-	sprintf(formatString, "%s %s", format[i], unit[i]);
-	sprintf(result, formatString, bytes);
+	NSString *numberString = [NSString stringWithFormat:format[i], bytes];
+	return [NSString stringWithFormat:@"%@ %@", numberString, unit[i]];
+}
+
+
+/**
+ *  Escapes a string for safe embedding as HTML text content.
+ */
+static NSString* htmlEscape(NSString *string) {
+	if (nil == string) {
+		return @"";
+	}
 	
-	return result;
+	NSMutableString *escaped = [string mutableCopy];
+	[escaped replaceOccurrencesOfString:@"&" withString:@"&amp;" options:0 range:NSMakeRange(0, [escaped length])];
+	[escaped replaceOccurrencesOfString:@"<" withString:@"&lt;" options:0 range:NSMakeRange(0, [escaped length])];
+	[escaped replaceOccurrencesOfString:@">" withString:@"&gt;" options:0 range:NSMakeRange(0, [escaped length])];
+	
+	return escaped;
 }
 
 

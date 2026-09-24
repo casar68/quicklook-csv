@@ -16,7 +16,7 @@
 /**
  *  Instantiates an object with the given row-dictionary.
  */
-+ (CSVRowObject *)newWithDictionary:(NSMutableDictionary *)dict
++ (CSVRowObject *)rowWithDictionary:(NSMutableDictionary *)dict
 {
 	CSVRowObject *row = [CSVRowObject new];
 	
