@@ -30,43 +30,68 @@ final class CSVThumbnailProvider: QLThumbnailProvider {
         let badgeMaxSize: CGFloat
     }
 
-    private static func measureLayout(for table: ParsedCSVTable, maxSize: CGSize) -> Layout {
-        let rowCount = max(4, min(table.rows.count, 18))
-        let rowHeight = ceil(maxSize.height / CGFloat(rowCount))
-        let fontSize = round(0.666 * rowHeight)
+    private static func measuredColumns(
+        for table: ParsedCSVTable, fontSize: CGFloat, textPadding: CGFloat
+    ) -> (widths: [CGFloat], total: CGFloat, font: NSFont) {
         let font = NSFont.systemFont(ofSize: fontSize)
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
-        let textPadding: CGFloat = 5
-
-        var columnWidths: [CGFloat] = []
-        var totalWidth: CGFloat = 0
+        var widths: [CGFloat] = []
+        var total: CGFloat = 0
         for key in table.columnKeys {
-            if totalWidth > maxSize.width { break }
             var maxCellWidth: CGFloat = 0
             for row in table.rows {
                 let text = row.value(forColumnKey: key) as NSString
                 maxCellWidth = max(maxCellWidth, text.size(withAttributes: attributes).width)
             }
             let columnWidth = maxCellWidth + 2 * textPadding
-            columnWidths.append(columnWidth)
-            totalWidth += columnWidth
+            widths.append(columnWidth)
+            total += columnWidth
+        }
+        return (widths, total, font)
+    }
+
+    private static func measureLayout(for table: ParsedCSVTable, maxSize: CGSize) -> Layout {
+        let rowCount = max(4, min(table.rows.count, 18))
+        let textPadding: CGFloat = 5
+
+        // Pass 1: measure at a fixed reference row height, independent of
+        // maxSize's magnitude, to learn this table's natural width/height
+        // proportions (short numeric cells measure narrow; long text cells
+        // measure wide).
+        let referenceRowHeight: CGFloat = 20
+        let referenceFontSize = round(0.666 * referenceRowHeight)
+        let reference = measuredColumns(for: table, fontSize: referenceFontSize, textPadding: textPadding)
+        let naturalWidth = max(reference.total, 1)
+        let naturalHeight = CGFloat(rowCount) * referenceRowHeight
+
+        // The largest page-like (fixed 0.8 aspect ratio) box that fits
+        // within maxSize, regardless of the table's own proportions.
+        var boxHeight = maxSize.height
+        var boxWidth = boxHeight * aspect
+        if boxWidth > maxSize.width {
+            boxWidth = maxSize.width
+            boxHeight = boxWidth / aspect
         }
 
-        var usedWidth = totalWidth
-        var usedHeight = CGFloat(table.rows.count) * rowHeight
-        let badgeMaxSize: CGFloat
+        // Pass 2: scale the natural measurement up (or down) so the
+        // content fills as much of that box as possible without
+        // overflowing either dimension. This is what keeps the returned
+        // contextSize close to maxSize as QLThumbnailReply's documentation
+        // requires — an absolute size derived purely from the content's
+        // own (possibly tiny) natural dimensions, with no scale-up step,
+        // left most of a large requested icon size blank.
+        let scale = min(boxWidth / naturalWidth, boxHeight / naturalHeight)
+        let rowHeight = ceil(referenceRowHeight * scale)
+        let fontSize = round(referenceFontSize * scale)
+        let final = measuredColumns(for: table, fontSize: fontSize, textPadding: textPadding)
 
-        if (usedWidth > maxSize.width && usedHeight > maxSize.height) || usedWidth <= usedHeight {
-            badgeMaxSize = usedHeight
-            usedWidth = usedHeight * aspect
-        } else {
-            badgeMaxSize = usedWidth
-            usedHeight = usedWidth * aspect
-        }
+        let usedWidth = max(final.total, 1)
+        let usedHeight = CGFloat(table.rows.count) * rowHeight
+        let badgeMaxSize = max(usedWidth, usedHeight)
 
         return Layout(
             size: CGSize(width: ceil(usedWidth), height: ceil(usedHeight)),
-            rowHeight: rowHeight, font: font, columnWidths: columnWidths, badgeMaxSize: badgeMaxSize
+            rowHeight: rowHeight, font: final.font, columnWidths: final.widths, badgeMaxSize: badgeMaxSize
         )
     }
 
