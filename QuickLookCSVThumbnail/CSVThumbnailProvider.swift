@@ -73,13 +73,17 @@ final class CSVThumbnailProvider: QLThumbnailProvider {
     @discardableResult
     private static func draw(table: ParsedCSVTable, layout: Layout) -> Bool {
         let textPadding: CGFloat = 5
+        // "calibrated" NSColor APIs resolve against a device color profile,
+        // which an off-screen thumbnail bitmap context may not have — use
+        // explicit sRGB-based APIs instead so colors are guaranteed to
+        // render rather than silently falling back to white/transparent.
         let attributes: [NSAttributedString.Key: Any] = [
             .font: layout.font,
-            .foregroundColor: NSColor(calibratedWhite: 0.25, alpha: 1)
+            .foregroundColor: NSColor(white: 0.25, alpha: 1)
         ]
         let rowBG = NSColor.white
-        let altRowBG = NSColor(calibratedWhite: 0.9, alpha: 1)
-        let borderColor = NSColor(calibratedWhite: 0.67, alpha: 1)
+        let altRowBG = NSColor(white: 0.9, alpha: 1)
+        let borderColor = NSColor(white: 0.67, alpha: 1)
 
         var cellX: CGFloat = 0
         for (columnIndex, key) in table.columnKeys.enumerated() {
@@ -126,7 +130,7 @@ final class CSVThumbnailProvider: QLThumbnailProvider {
         badgeShadow.shadowColor = NSColor.white
         let badgeAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.boldSystemFont(ofSize: badgeFontSize),
-            .foregroundColor: NSColor(calibratedRed: 0.05, green: 0.25, blue: 0.1, alpha: 1),
+            .foregroundColor: NSColor(srgbRed: 0.05, green: 0.25, blue: 0.1, alpha: 1),
             .shadow: badgeShadow
         ]
         let badgeSize = badgeString.size(withAttributes: badgeAttributes)
