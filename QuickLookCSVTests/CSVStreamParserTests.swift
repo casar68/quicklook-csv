@@ -48,6 +48,17 @@ struct CSVStreamParserTests {
         #expect(table.rowsTruncated == false)
     }
 
+    @Test func columnCountReflectsOnlyStoredRowsNotADroppedRowPastMaxRows() throws {
+        // The 3rd row here is dropped for exceeding maxRows, but has more
+        // columns than either stored row. columnKeys must reflect only the
+        // 2 stored rows, not leak the dropped row's wider column count.
+        var config = CSVStreamParser.Configuration.preview
+        config.maxRows = 2
+        let table = try parseAll("a,b\nc,d\ne,f,g,h,i\n", configuration: config)
+        #expect(table.rows.count == 2)
+        #expect(table.columnKeys == ["col_0", "col_1"])
+    }
+
     @Test func consumeAcrossMultipleChunksProducesSameResultAsOneShot() throws {
         let parser = CSVStreamParser(configuration: .preview)
         let bytes = Array("a,b\n1,2\n".utf8)

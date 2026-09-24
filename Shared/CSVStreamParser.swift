@@ -336,12 +336,16 @@ final class CSVStreamParser {
         if cellsSeenInCurrentRow > configuration.maxColumns {
             columnsTruncated = true
         }
-        columnCount = max(columnCount, min(cellsSeenInCurrentRow, configuration.maxColumns))
 
         if rows.count >= configuration.maxRows {
             rowsTruncated = true
             finished = true
         } else {
+            // Only a row that actually gets stored may grow columnCount —
+            // otherwise a row dropped for exceeding maxRows could leak a
+            // wider column count into columnKeys than any displayed row
+            // actually has, producing extra blank columns in the UI.
+            columnCount = max(columnCount, min(cellsSeenInCurrentRow, configuration.maxColumns))
             var cells: [String: String] = [:]
             for (index, value) in currentRowValues.enumerated() {
                 cells["col_\(index)"] = value
@@ -376,8 +380,12 @@ extension CSVStreamParser {
 
         let parser = CSVStreamParser(configuration: configuration)
         while true {
-            let chunkData = handle.readData(ofLength: configuration.chunkByteSize)
-            if chunkData.isEmpty { break }
+            // `read(upToCount:)` (not the older `readData(ofLength:)`)
+            // surfaces a real I/O error (disconnected volume, revoked
+            // permission mid-read) as a catchable Swift error instead of
+            // an uncatchable ObjC exception that would crash the extension.
+            guard let chunkData = try handle.read(upToCount: configuration.chunkByteSize),
+                  !chunkData.isEmpty else { break }
             let shouldStop = try parser.consume(Array(chunkData))
             if shouldStop { break }
         }
